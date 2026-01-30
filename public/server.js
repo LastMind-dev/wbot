@@ -124,10 +124,19 @@ app.post('/api/instance/create', async(req, res) => {
 
     if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
 
-    const id = crypto.randomUUID();
-    const token = crypto.randomBytes(32).toString('hex');
-
     try {
+        // Verificar se já existe instância com mesmo nome E mesma URL
+        const [existing] = await pool.execute(
+            'SELECT id FROM instances WHERE name = ? AND sistema_php_url = ?', [name, sistema_php_url]
+        );
+
+        if (existing.length > 0) {
+            return res.status(400).json({ error: 'Já existe uma instância com este nome e URL do Sistema PHP.' });
+        }
+
+        const id = crypto.randomUUID();
+        const token = crypto.randomBytes(32).toString('hex');
+
         await pool.execute(
             'INSERT INTO instances (id, name, sistema_php_url, webhook, api_token, status) VALUES (?, ?, ?, ?, ?, 0)', [id, name, sistema_php_url, webhook || null, token]
         );
@@ -139,6 +148,47 @@ app.post('/api/instance/create', async(req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Erro ao criar instância: ' + err.message });
+    }
+});
+
+// Deletar Instância (API)
+app.delete('/api/instance/:id', async(req, res) => {
+    const { id } = req.params;
+
+    if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
+
+    try {
+        // Parar sessão se estiver ativa
+        const session = sessions.get(id);
+        if (session && session.client) {
+            try {
+                await session.client.destroy();
+            } catch (e) {
+                console.error(`Erro ao destruir cliente ${id}:`, e.message);
+            }
+            sessions.delete(id);
+        }
+
+        // Deletar do banco de dados
+        const [result] = await pool.execute('DELETE FROM instances WHERE id = ?', [id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Instância não encontrada' });
+        }
+
+        // Tentar deletar pasta de sessão (LocalAuth)
+        const fs = require('fs');
+        const path = require('path');
+        const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${id}`);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log(`[${id}] Pasta de sessão deletada`);
+        }
+
+        res.json({ success: true, message: 'Instância deletada com sucesso!' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Erro ao deletar instância: ' + err.message });
     }
 });
 
@@ -294,6 +344,9 @@ app.get('/admin', requireAuth, async(req, res) => {
                 if (status === 'INITIALIZING') statusClass = 'status-qr';
 
                 let actions = '';
+                // Botão de deletar sempre visível
+                const deleteBtn = `<button onclick="deleteInstance('${inst.id}', '${inst.name}')" class="btn" style="background: #721c24; color: #fff; font-size: 11px;" title="Deletar instância">🗑️</button>`;
+
                 if (status === 'DISCONNECTED' || status === 'AUTH_FAILURE' || status === 'INIT_ERROR') {
                     actions = `<button onclick="controlSession('${inst.id}', 'start')" class="btn btn-start">Iniciar</button>`;
                     actions += `<button onclick="resetSession('${inst.id}')" class="btn" style="background: #ffc107; color: #000;">Reset</button>`;
@@ -313,6 +366,7 @@ app.get('/admin', requireAuth, async(req, res) => {
                     actions += `<button onclick="reconnectSession('${inst.id}')" class="btn" style="background: #17a2b8; color: #fff;">Reconectar</button>`;
                     actions += `<button onclick="resetSession('${inst.id}')" class="btn" style="background: #ffc107; color: #000;">Reset</button>`;
                 }
+                actions += deleteBtn;
 
                 html += `
                     <div class="instance-item" data-id="${inst.id}">
@@ -450,6 +504,27 @@ app.get('/admin', requireAuth, async(req, res) => {
                             setTimeout(() => location.reload(), 3000);
                         } catch (err) {
                             alert('Erro ao reconectar: ' + err.message);
+                        }
+                    }
+
+                    async function deleteInstance(id, name) {
+                        if (!confirm('⚠️ ATENÇÃO: Você está prestes a DELETAR permanentemente a instância "' + name + '".\\n\\nIsso irá:\\n- Parar a sessão\\n- Apagar todos os dados de autenticação\\n- Remover do banco de dados\\n\\nEsta ação NÃO pode ser desfeita!\\n\\nDeseja continuar?')) {
+                            return;
+                        }
+                        
+                        try {
+                            const res = await fetch('/api/instance/' + id, {
+                                method: 'DELETE'
+                            });
+                            const data = await res.json();
+                            if (data.success) {
+                                alert('✅ Instância deletada com sucesso!');
+                                location.reload();
+                            } else {
+                                alert('Erro: ' + data.error);
+                            }
+                        } catch (err) {
+                            alert('Erro ao deletar instância: ' + err.message);
                         }
                     }
                 </script>
@@ -912,17 +987,36 @@ async function startSession(instanceId) {
             session.status = 'AUTHENTICATED';
             session.authenticatedAt = Date.now();
 
-            // Verificação agressiva a cada 30s para detectar quando estiver conectado
+            // Verificação MUITO agressiva - primeira em 10s, depois a cada 15s
             const checkAuthenticatedState = async(attempt = 1) => {
                 const currentSession = sessions.get(instanceId);
                 if (!currentSession || currentSession.status !== 'AUTHENTICATED') {
                     return; // Já mudou de estado, parar verificação
                 }
 
-                console.log(`[${instanceId}] ⏳ Verificação ${attempt}/5 - Status ainda AUTHENTICATED...`);
+                console.log(`[${instanceId}] ⏳ Verificação ${attempt}/10 - Status ainda AUTHENTICATED...`);
 
                 try {
                     if (currentSession.client && currentSession.client.pupPage && !currentSession.client.pupPage.isClosed()) {
+                        // Primeiro, tentar forçar a sincronização manualmente
+                        if (attempt === 2 || attempt === 5) {
+                            console.log(`[${instanceId}] 🔄 Tentando forçar sincronização...`);
+                            try {
+                                await currentSession.client.pupPage.evaluate(() => {
+                                    // Forçar verificação de hasSynced
+                                    if (window.AuthStore && window.AuthStore.AppState) {
+                                        const hasSynced = window.AuthStore.AppState.hasSynced;
+                                        console.log('hasSynced:', hasSynced);
+                                        if (hasSynced && window.onAppStateHasSyncedEvent) {
+                                            window.onAppStateHasSyncedEvent();
+                                        }
+                                    }
+                                });
+                            } catch (forceErr) {
+                                console.log(`[${instanceId}] Erro ao forçar sync:`, forceErr.message);
+                            }
+                        }
+
                         const state = await Promise.race([
                             currentSession.client.getState(),
                             new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
@@ -935,7 +1029,18 @@ async function startSession(instanceId) {
                             currentSession.status = 'CONNECTED';
                             currentSession.qr = null;
 
+                            // Tentar injetar Store se necessário
                             try {
+                                const hasStore = await currentSession.client.pupPage.evaluate(() => {
+                                    return typeof window.Store !== 'undefined';
+                                });
+                                if (!hasStore) {
+                                    console.log(`[${instanceId}] 🔧 Store não encontrado, aguardando...`);
+                                }
+                            } catch (e) {}
+
+                            try {
+                                // Tentar obter info do cliente
                                 const info = currentSession.client.info;
                                 if (info && info.wid) {
                                     const phoneNumber = info.wid.user;
@@ -960,9 +1065,9 @@ async function startSession(instanceId) {
                     console.error(`[${instanceId}] Error checking state:`, err.message);
                 }
 
-                // Tentar novamente até 5 vezes (30s * 5 = 2.5 minutos máximo)
-                if (attempt < 5) {
-                    setTimeout(() => checkAuthenticatedState(attempt + 1), 30000);
+                // Tentar novamente até 10 vezes (15s * 10 = 2.5 minutos máximo)
+                if (attempt < 10) {
+                    setTimeout(() => checkAuthenticatedState(attempt + 1), 15000);
                 } else {
                     console.log(`[${instanceId}] ⚠️ Máximo de tentativas. Status: SYNC_TIMEOUT`);
                     const sess = sessions.get(instanceId);
@@ -972,8 +1077,8 @@ async function startSession(instanceId) {
                 }
             };
 
-            // Primeira verificação após 30 segundos
-            setTimeout(() => checkAuthenticatedState(1), 30000);
+            // Primeira verificação após 10 segundos (mais rápido!)
+            setTimeout(() => checkAuthenticatedState(1), 10000);
         }
     });
 
