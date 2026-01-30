@@ -118,7 +118,7 @@ app.get('/', (req, res) => {
 });
 
 // Criar Nova Instância (API)
-app.post('/api/instance/create', async (req, res) => {
+app.post('/api/instance/create', async(req, res) => {
     const { name, sistema_php_url, webhook } = req.body;
     if (!name || !sistema_php_url) return res.status(400).json({ error: 'Nome e URL do Sistema são obrigatórios' });
 
@@ -129,8 +129,7 @@ app.post('/api/instance/create', async (req, res) => {
 
     try {
         await pool.execute(
-            'INSERT INTO instances (id, name, sistema_php_url, webhook, api_token, status) VALUES (?, ?, ?, ?, ?, 0)',
-            [id, name, sistema_php_url, webhook || null, token]
+            'INSERT INTO instances (id, name, sistema_php_url, webhook, api_token, status) VALUES (?, ?, ?, ?, ?, 0)', [id, name, sistema_php_url, webhook || null, token]
         );
 
         // Auto-start
@@ -173,7 +172,7 @@ app.get('/login', (req, res) => {
     `);
 });
 
-app.post('/login', async (req, res) => {
+app.post('/login', async(req, res) => {
     const { username, password } = req.body;
 
     if (!pool) return res.send('Erro de conexão com banco');
@@ -208,7 +207,7 @@ function requireAuth(req, res, next) {
 }
 
 // Dashboard Administrativo
-app.get('/admin', requireAuth, async (req, res) => {
+app.get('/admin', requireAuth, async(req, res) => {
     if (!pool) return res.send('Erro: Banco de dados não conectado.');
 
     try {
@@ -635,7 +634,7 @@ async function startSession(instanceId) {
     const startKeepAlive = () => {
         const session = sessions.get(instanceId);
         if (!session) return;
-        
+
         // Limpar intervalos anteriores se existirem
         if (session.keepAliveInterval) {
             clearInterval(session.keepAliveInterval);
@@ -643,14 +642,14 @@ async function startSession(instanceId) {
         if (session.connectionMonitorInterval) {
             clearInterval(session.connectionMonitorInterval);
         }
-        
+
         // Ping a cada 20 segundos para manter conexão ativa (reduzido de 30s)
-        session.keepAliveInterval = setInterval(async () => {
+        session.keepAliveInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
             if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
                 return;
             }
-            
+
             try {
                 // Verificar se o browser ainda está conectado
                 if (!currentSession.client.pupBrowser || !currentSession.client.pupBrowser.isConnected()) {
@@ -659,7 +658,7 @@ async function startSession(instanceId) {
                     await handleConnectionLoss(instanceId, 'BROWSER_DISCONNECTED');
                     return;
                 }
-                
+
                 // Verificar se a página ainda está ativa
                 if (!currentSession.client.pupPage || currentSession.client.pupPage.isClosed()) {
                     console.log(`[${instanceId}] Keep-Alive: Página fechada, iniciando reconexão...`);
@@ -667,20 +666,20 @@ async function startSession(instanceId) {
                     await handleConnectionLoss(instanceId, 'PAGE_CLOSED');
                     return;
                 }
-                
+
                 // Ping simples para manter a conexão
                 const state = await Promise.race([
                     currentSession.client.getState(),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 15000))
                 ]);
-                
+
                 currentSession.lastActivity = Date.now();
                 currentSession.lastPing = Date.now();
                 currentSession.consecutiveFailures = 0; // Reset contador de falhas
-                
+
                 if (state !== 'CONNECTED') {
                     console.log(`[${instanceId}] Keep-Alive: Estado atual = ${state}`);
-                    
+
                     // Se estado for CONFLICT, tentar takeover
                     if (state === 'CONFLICT') {
                         console.log(`[${instanceId}] Keep-Alive: Detectado conflito, tentando takeover...`);
@@ -696,7 +695,7 @@ async function startSession(instanceId) {
                 const currentSession = sessions.get(instanceId);
                 if (currentSession) {
                     currentSession.consecutiveFailures = (currentSession.consecutiveFailures || 0) + 1;
-                    
+
                     // Se falhar 3 vezes consecutivas, tentar reconectar
                     if (currentSession.consecutiveFailures >= 3) {
                         console.log(`[${instanceId}] Keep-Alive: ${currentSession.consecutiveFailures} falhas consecutivas, reconectando...`);
@@ -706,21 +705,21 @@ async function startSession(instanceId) {
                 }
             }
         }, 20000); // 20 segundos (reduzido de 30s)
-        
+
         // Monitor de conexão adicional - verifica WebSocket a cada 45 segundos
-        session.connectionMonitorInterval = setInterval(async () => {
+        session.connectionMonitorInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
             if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
                 return;
             }
-            
+
             try {
                 // Verificar tempo desde último ping bem-sucedido
                 const timeSinceLastPing = Date.now() - (currentSession.lastPing || Date.now());
                 if (timeSinceLastPing > 60000) { // Mais de 1 minuto sem ping
                     console.log(`[${instanceId}] Monitor: Sem ping há ${Math.round(timeSinceLastPing/1000)}s`);
                 }
-                
+
                 // Verificar se o WebSocket está ativo através da página
                 const wsStatus = await Promise.race([
                     currentSession.client.pupPage.evaluate(() => {
@@ -732,7 +731,7 @@ async function startSession(instanceId) {
                     }),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
                 ]);
-                
+
                 if (wsStatus === false) {
                     console.log(`[${instanceId}] Monitor: WebSocket não está conectado`);
                 }
@@ -740,24 +739,24 @@ async function startSession(instanceId) {
                 console.error(`[${instanceId}] Monitor Error:`, err.message);
             }
         }, 45000); // 45 segundos
-        
+
         console.log(`[${instanceId}] Keep-Alive e Monitor de conexão iniciados`);
     };
-    
+
     // ========================================
     // FUNÇÃO DE TRATAMENTO DE PERDA DE CONEXÃO
     // ========================================
-    const handleConnectionLoss = async (instId, reason) => {
+    const handleConnectionLoss = async(instId, reason) => {
         const session = sessions.get(instId);
         if (!session || session.isReconnecting) return;
-        
+
         session.isReconnecting = true;
         console.log(`[${instId}] 🔌 Perda de conexão detectada: ${reason}`);
-        
+
         // Limpar intervalos
         if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
         if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
-        
+
         // Tentar destruir cliente atual
         try {
             if (session.client) {
@@ -769,15 +768,15 @@ async function startSession(instanceId) {
         } catch (e) {
             console.error(`[${instId}] Erro ao destruir cliente:`, e.message);
         }
-        
+
         sessions.delete(instId);
         await updateInstanceStatus(instId, 0);
-        
+
         // Reconectar após delay
         const delay = 5000 + (Math.random() * 5000); // 5-10 segundos
         console.log(`[${instId}] 🔄 Reconectando em ${Math.round(delay/1000)}s...`);
-        
-        setTimeout(async () => {
+
+        setTimeout(async() => {
             if (!sessions.has(instId)) {
                 try {
                     await startSession(instId);
@@ -795,14 +794,14 @@ async function startSession(instanceId) {
         if (session) {
             session.status = `LOADING_${percent}%`;
             session.lastActivity = Date.now();
-            
+
             // Se chegou a 100%, iniciar timeout de 60s para ready
             if (percent === 100) {
                 session.loadingComplete = Date.now();
                 console.log(`[${instanceId}] Loading complete, waiting for ready event...`);
-                
+
                 // Timeout de 60s após loading 100%
-                setTimeout(async () => {
+                setTimeout(async() => {
                     const currentSession = sessions.get(instanceId);
                     if (currentSession && currentSession.status.startsWith('LOADING_')) {
                         console.error(`[${instanceId}] TIMEOUT: Ready event not received after loading 100%`);
@@ -815,26 +814,46 @@ async function startSession(instanceId) {
     });
 
     // Evento de mudança de estado - APRIMORADO
-    client.on('change_state', async (state) => {
+    client.on('change_state', async(state) => {
         console.log(`[${instanceId}] State changed to: ${state}`);
         const session = sessions.get(instanceId);
         if (session) {
             session.lastActivity = Date.now();
             session.lastState = state;
-            
+
             if (state === 'CONNECTED') {
                 // Às vezes o ready não dispara mas o state muda para CONNECTED
-                if (session.status.startsWith('LOADING_') || session.status === 'SYNC_TIMEOUT') {
-                    console.log(`[${instanceId}] State CONNECTED detected, forcing ready status`);
+                const needsForceConnect = session.status.startsWith('LOADING_') ||
+                    session.status === 'SYNC_TIMEOUT' ||
+                    session.status === 'AUTHENTICATED' ||
+                    session.status === 'SYNC_FAILED';
+
+                if (needsForceConnect) {
+                    console.log(`[${instanceId}] State CONNECTED detected (was ${session.status}), forcing ready status`);
                     session.status = 'CONNECTED';
+                    session.qr = null;
                     session.reconnectAttempts = 0; // Reset contador
+
+                    // Tentar obter número do telefone
+                    try {
+                        const info = session.client.info;
+                        if (info && info.wid) {
+                            const phoneNumber = info.wid.user;
+                            updateInstanceStatus(instanceId, 1, phoneNumber);
+                        } else {
+                            updateInstanceStatus(instanceId, 1);
+                        }
+                    } catch (e) {
+                        updateInstanceStatus(instanceId, 1);
+                    }
+
                     startKeepAlive();
                 }
             } else if (state === 'CONFLICT') {
                 console.log(`[${instanceId}] ⚠️ CONFLICT detectado - tentando takeover...`);
                 // O takeover será tratado automaticamente pelo wwebjs se takeoverOnConflict estiver true
                 // Mas vamos forçar manualmente também
-                setTimeout(async () => {
+                setTimeout(async() => {
                     try {
                         if (session.client && session.client.pupPage) {
                             await session.client.pupPage.evaluate(() => window.Store.AppState.takeover());
@@ -867,7 +886,7 @@ async function startSession(instanceId) {
         }
     });
 
-    client.on('ready', async () => {
+    client.on('ready', async() => {
         console.log(`Client ${instanceId} is ready!`);
         const session = sessions.get(instanceId);
         if (session) {
@@ -875,7 +894,7 @@ async function startSession(instanceId) {
             session.qr = null;
             session.lastActivity = Date.now();
             session.reconnectAttempts = 0; // Reset contador de reconexões
-            
+
             // Iniciar Keep-Alive
             startKeepAlive();
         }
@@ -889,7 +908,73 @@ async function startSession(instanceId) {
     client.on('authenticated', () => {
         console.log(`Client ${instanceId} authenticated`);
         const session = sessions.get(instanceId);
-        if (session) session.status = 'AUTHENTICATED';
+        if (session) {
+            session.status = 'AUTHENTICATED';
+            session.authenticatedAt = Date.now();
+
+            // Verificação agressiva a cada 30s para detectar quando estiver conectado
+            const checkAuthenticatedState = async(attempt = 1) => {
+                const currentSession = sessions.get(instanceId);
+                if (!currentSession || currentSession.status !== 'AUTHENTICATED') {
+                    return; // Já mudou de estado, parar verificação
+                }
+
+                console.log(`[${instanceId}] ⏳ Verificação ${attempt}/5 - Status ainda AUTHENTICATED...`);
+
+                try {
+                    if (currentSession.client && currentSession.client.pupPage && !currentSession.client.pupPage.isClosed()) {
+                        const state = await Promise.race([
+                            currentSession.client.getState(),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+                        ]);
+
+                        console.log(`[${instanceId}] Current state: ${state}`);
+
+                        if (state === 'CONNECTED') {
+                            console.log(`[${instanceId}] ✅ Forcing CONNECTED status (ready event missed)`);
+                            currentSession.status = 'CONNECTED';
+                            currentSession.qr = null;
+
+                            try {
+                                const info = currentSession.client.info;
+                                if (info && info.wid) {
+                                    const phoneNumber = info.wid.user;
+                                    await updateInstanceStatus(instanceId, 1, phoneNumber);
+                                } else {
+                                    await updateInstanceStatus(instanceId, 1);
+                                }
+                            } catch (infoErr) {
+                                console.error(`[${instanceId}] Error getting client info:`, infoErr.message);
+                                await updateInstanceStatus(instanceId, 1);
+                            }
+
+                            startKeepAlive();
+                            return;
+                        } else if (state === 'OPENING' || state === 'PAIRING') {
+                            console.log(`[${instanceId}] Still syncing (${state}), will check again...`);
+                        } else {
+                            console.log(`[${instanceId}] State: ${state}`);
+                        }
+                    }
+                } catch (err) {
+                    console.error(`[${instanceId}] Error checking state:`, err.message);
+                }
+
+                // Tentar novamente até 5 vezes (30s * 5 = 2.5 minutos máximo)
+                if (attempt < 5) {
+                    setTimeout(() => checkAuthenticatedState(attempt + 1), 30000);
+                } else {
+                    console.log(`[${instanceId}] ⚠️ Máximo de tentativas. Status: SYNC_TIMEOUT`);
+                    const sess = sessions.get(instanceId);
+                    if (sess && sess.status === 'AUTHENTICATED') {
+                        sess.status = 'SYNC_TIMEOUT';
+                    }
+                }
+            };
+
+            // Primeira verificação após 30 segundos
+            setTimeout(() => checkAuthenticatedState(1), 30000);
+        }
     });
 
     client.on('auth_failure', (msg) => {
@@ -911,7 +996,7 @@ async function startSession(instanceId) {
     });
 
     // Handler para chamadas recebidas (mantém a conexão ativa)
-    client.on('call', async (call) => {
+    client.on('call', async(call) => {
         console.log(`[${instanceId}] 📞 Chamada recebida de ${call.from}`);
         const session = sessions.get(instanceId);
         if (session) {
@@ -919,14 +1004,14 @@ async function startSession(instanceId) {
         }
     });
 
-    client.on('disconnected', async (reason) => {
+    client.on('disconnected', async(reason) => {
         console.log(`[${instanceId}] ❌ DISCONNECTED - Reason: ${reason}`);
         await updateInstanceStatus(instanceId, 0);
 
         // Clean up session
         const session = sessions.get(instanceId);
         let reconnectAttempts = 0;
-        
+
         if (session) {
             // Parar Keep-Alive e Monitor
             if (session.keepAliveInterval) {
@@ -935,13 +1020,13 @@ async function startSession(instanceId) {
             if (session.connectionMonitorInterval) {
                 clearInterval(session.connectionMonitorInterval);
             }
-            
+
             reconnectAttempts = session.reconnectAttempts || 0;
             session.status = 'DISCONNECTED';
             session.client = null;
             session.disconnectReason = reason;
             session.disconnectTime = Date.now();
-            
+
             // Destruir cliente com timeout
             try {
                 await Promise.race([
@@ -960,12 +1045,12 @@ async function startSession(instanceId) {
         const noReconnectReasons = ['LOGOUT', 'TOS_BLOCK', 'SMB_TOS_BLOCK'];
         const immediateReconnectReasons = ['CONFLICT', 'UNPAIRED', 'NAVIGATION'];
         const maxReconnectAttempts = 10; // Aumentado de 5 para 10
-        
+
         if (noReconnectReasons.includes(reason)) {
             console.log(`[${instanceId}] ⛔ Reconexão desabilitada para: ${reason}`);
             return;
         }
-        
+
         if (reconnectAttempts >= maxReconnectAttempts) {
             console.log(`[${instanceId}] ⛔ Máximo de tentativas de reconexão atingido (${maxReconnectAttempts})`);
             // Resetar contador após 30 minutos para permitir novas tentativas
@@ -978,7 +1063,7 @@ async function startSession(instanceId) {
             }, 1800000); // 30 minutos
             return;
         }
-        
+
         // Calcular delay com backoff exponencial
         let delay;
         if (immediateReconnectReasons.includes(reason)) {
@@ -989,22 +1074,22 @@ async function startSession(instanceId) {
             const baseDelay = 5000;
             delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts), 300000);
         }
-        
+
         // Adicionar jitter para evitar thundering herd
         delay += Math.random() * 3000;
-        
+
         console.log(`[${instanceId}] 🔄 Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1}/${maxReconnectAttempts})`);
-        
-        setTimeout(async () => {
+
+        setTimeout(async() => {
             try {
                 if (!pool) return;
-                
+
                 // Verificar se a instância ainda existe no banco
                 const [rows] = await pool.execute('SELECT id FROM instances WHERE id = ?', [instanceId]);
-                
+
                 if (rows.length > 0 && !sessions.has(instanceId)) {
                     console.log(`[${instanceId}] 🔄 Iniciando reconexão automática...`);
-                    
+
                     // Iniciar sessão e incrementar contador
                     const newSession = await startSession(instanceId);
                     if (newSession) {
@@ -1023,20 +1108,20 @@ async function startSession(instanceId) {
         if (session) {
             session.lastActivity = Date.now();
         }
-        
+
         console.log(`[${instanceId}] Message from ${msg.from}: ${msg.body}`);
         handleIncomingMessage(instanceId, msg);
     });
 
     try {
         console.log(`[${instanceId}] Calling client.initialize()...`);
-        
+
         // Timeout de 2 minutos para inicialização
         const initPromise = client.initialize();
         const timeoutPromise = new Promise((_, reject) => {
             setTimeout(() => reject(new Error('Timeout: Inicialização demorou mais de 2 minutos')), 120000);
         });
-        
+
         await Promise.race([initPromise, timeoutPromise]);
         console.log(`[${instanceId}] client.initialize() completed`);
     } catch (err) {
@@ -1092,8 +1177,7 @@ async function handleIncomingMessage(instanceId, msg) {
             const [agendamentos] = await pool.execute(
                 `SELECT id, error_message FROM agendamentos 
                  WHERE instance_id = ? AND to_number = ? AND status = 'pending' 
-                 ORDER BY created_at DESC LIMIT 1`,
-                [instanceId, phone]
+                 ORDER BY created_at DESC LIMIT 1`, [instanceId, phone]
             );
 
             if (agendamentos.length > 0) {
@@ -1113,15 +1197,13 @@ async function handleIncomingMessage(instanceId, msg) {
                 if (messageBody === '1') {
                     // Confirmado
                     await pool.execute(
-                        `UPDATE agendamentos SET status = 'sent' WHERE id = ?`,
-                        [agendamento.id]
+                        `UPDATE agendamentos SET status = 'sent' WHERE id = ?`, [agendamento.id]
                     );
 
                     // Salvar na tabela confirmacoes_processadas
                     await pool.execute(
                         `INSERT INTO confirmacoes_processadas (telefone, agendamento_id, resposta, instance_id) 
-                         VALUES (?, ?, '1', ?)`,
-                        [phone, extraData.id_consulta || agendamento.id, instanceId]
+                         VALUES (?, ?, '1', ?)`, [phone, extraData.id_consulta || agendamento.id, instanceId]
                     );
 
                     // Enviar mensagem de confirmação
@@ -1135,15 +1217,13 @@ async function handleIncomingMessage(instanceId, msg) {
                 } else if (messageBody === '2') {
                     // Cancelado/Reagendar
                     await pool.execute(
-                        `UPDATE agendamentos SET status = 'cancelled' WHERE id = ?`,
-                        [agendamento.id]
+                        `UPDATE agendamentos SET status = 'cancelled' WHERE id = ?`, [agendamento.id]
                     );
 
                     // Salvar na tabela confirmacoes_processadas
                     await pool.execute(
                         `INSERT INTO confirmacoes_processadas (telefone, agendamento_id, resposta, instance_id) 
-                         VALUES (?, ?, '2', ?)`,
-                        [phone, extraData.id_consulta || agendamento.id, instanceId]
+                         VALUES (?, ?, '2', ?)`, [phone, extraData.id_consulta || agendamento.id, instanceId]
                     );
 
                     // Enviar mensagem de reagendamento
@@ -1173,8 +1253,7 @@ async function handleIncomingMessage(instanceId, msg) {
                         // Salvar log do webhook
                         await pool.execute(
                             `INSERT INTO webhook_logs (instance_id, url, payload, response, status_code) 
-                             VALUES (?, ?, ?, ?, ?)`,
-                            [instanceId, extraData.url_recebe, JSON.stringify(payload), JSON.stringify(webhookResponse.data), webhookResponse.status]
+                             VALUES (?, ?, ?, ?, ?)`, [instanceId, extraData.url_recebe, JSON.stringify(payload), JSON.stringify(webhookResponse.data), webhookResponse.status]
                         );
                     } catch (webhookErr) {
                         console.error(`[Incoming] Webhook error:`, webhookErr.message);
@@ -1182,8 +1261,7 @@ async function handleIncomingMessage(instanceId, msg) {
                         // Salvar log do erro
                         await pool.execute(
                             `INSERT INTO webhook_logs (instance_id, url, payload, response, status_code) 
-                             VALUES (?, ?, ?, ?, ?)`,
-                            [instanceId, extraData.url_recebe, JSON.stringify(payload), webhookErr.message, 0]
+                             VALUES (?, ?, ?, ?, ?)`, [instanceId, extraData.url_recebe, JSON.stringify(payload), webhookErr.message, 0]
                         );
                     }
                 }
@@ -1199,8 +1277,7 @@ async function handleIncomingMessage(instanceId, msg) {
                     const [lastAgendamento] = await pool.execute(
                         `SELECT error_message FROM agendamentos 
                          WHERE instance_id = ? AND to_number = ? 
-                         ORDER BY created_at DESC LIMIT 1`,
-                        [instanceId, phone]
+                         ORDER BY created_at DESC LIMIT 1`, [instanceId, phone]
                     );
 
                     if (lastAgendamento.length > 0) {
@@ -1209,7 +1286,7 @@ async function handleIncomingMessage(instanceId, msg) {
                             if (extraData.msg_erro) {
                                 await session.client.sendMessage(msg.from, extraData.msg_erro);
                             }
-                        } catch (e) { }
+                        } catch (e) {}
                     }
                 }
             }
@@ -1217,8 +1294,7 @@ async function handleIncomingMessage(instanceId, msg) {
 
         // Para outras mensagens (não são 1 ou 2), enviar para o webhook genérico
         const [rows] = await pool.execute(
-            'SELECT webhook FROM instances WHERE id = ?',
-            [instanceId]
+            'SELECT webhook FROM instances WHERE id = ?', [instanceId]
         );
 
         if (rows.length > 0 && rows[0].webhook) {
@@ -1246,7 +1322,7 @@ async function handleIncomingMessage(instanceId, msg) {
 // --- API Endpoints ---
 
 // Start a session
-app.post('/api/session/start', async (req, res) => {
+app.post('/api/session/start', async(req, res) => {
     const { instanceId } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
 
@@ -1259,7 +1335,7 @@ app.post('/api/session/start', async (req, res) => {
 });
 
 // Stop a session
-app.post('/api/session/stop', async (req, res) => {
+app.post('/api/session/stop', async(req, res) => {
     const { instanceId } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
 
@@ -1268,7 +1344,7 @@ app.post('/api/session/stop', async (req, res) => {
 });
 
 // Reset/Limpar sessão corrompida
-app.post('/api/session/reset', async (req, res) => {
+app.post('/api/session/reset', async(req, res) => {
     const { instanceId } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
 
@@ -1296,9 +1372,9 @@ app.post('/api/session/reset', async (req, res) => {
         // 3. Atualizar status no banco
         await updateInstanceStatus(instanceId, 0);
 
-        res.json({ 
-            success: true, 
-            message: 'Sessão resetada com sucesso. Inicie novamente para gerar novo QR Code.' 
+        res.json({
+            success: true,
+            message: 'Sessão resetada com sucesso. Inicie novamente para gerar novo QR Code.'
         });
     } catch (err) {
         console.error(`[RESET] Erro ao resetar sessão ${instanceId}:`, err);
@@ -1307,7 +1383,7 @@ app.post('/api/session/reset', async (req, res) => {
 });
 
 // Reset completo - limpa sessão E cache
-app.post('/api/session/full-reset', async (req, res) => {
+app.post('/api/session/full-reset', async(req, res) => {
     const { instanceId } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
 
@@ -1342,9 +1418,9 @@ app.post('/api/session/full-reset', async (req, res) => {
         // 4. Atualizar status no banco
         await updateInstanceStatus(instanceId, 0);
 
-        res.json({ 
-            success: true, 
-            message: 'Reset completo realizado. Cache e sessão removidos. Inicie novamente.' 
+        res.json({
+            success: true,
+            message: 'Reset completo realizado. Cache e sessão removidos. Inicie novamente.'
         });
     } catch (err) {
         console.error(`[FULL-RESET] Erro ao resetar sessão ${instanceId}:`, err);
@@ -1371,13 +1447,13 @@ app.get('/api/session/status/:id', (req, res) => {
 app.get('/api/health', (req, res) => {
     const memoryUsage = process.memoryUsage();
     const now = Date.now();
-    
+
     const activeSessions = Array.from(sessions.entries()).map(([id, session]) => ({
         id,
         status: session.status,
         hasClient: !!session.client,
-        hasBrowser: session.client?.pupBrowser?.isConnected() || false,
-        hasPage: session.client?.pupPage && !session.client?.pupPage?.isClosed() || false,
+        hasBrowser: session.client ? .pupBrowser ? .isConnected() || false,
+        hasPage: session.client ? .pupPage && !session.client ? .pupPage ? .isClosed() || false,
         lastActivity: session.lastActivity ? Math.round((now - session.lastActivity) / 1000) + 's ago' : 'N/A',
         lastPing: session.lastPing ? Math.round((now - session.lastPing) / 1000) + 's ago' : 'N/A',
         consecutiveFailures: session.consecutiveFailures || 0,
@@ -1419,18 +1495,18 @@ function formatUptime(seconds) {
     const hours = Math.floor((seconds % 86400) / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
-    
+
     const parts = [];
     if (days > 0) parts.push(`${days}d`);
     if (hours > 0) parts.push(`${hours}h`);
     if (minutes > 0) parts.push(`${minutes}m`);
     parts.push(`${secs}s`);
-    
+
     return parts.join(' ');
 }
 
 // Forçar reconexão de uma instância
-app.post('/api/session/reconnect', async (req, res) => {
+app.post('/api/session/reconnect', async(req, res) => {
     const { instanceId } = req.body;
     if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
 
@@ -1454,9 +1530,9 @@ app.post('/api/session/reconnect', async (req, res) => {
         // Iniciar nova sessão
         await startSession(instanceId);
 
-        res.json({ 
-            success: true, 
-            message: 'Reconexão iniciada. Aguarde alguns segundos.' 
+        res.json({
+            success: true,
+            message: 'Reconexão iniciada. Aguarde alguns segundos.'
         });
     } catch (err) {
         console.error(`[Reconnect] Erro:`, err);
@@ -1465,15 +1541,15 @@ app.post('/api/session/reconnect', async (req, res) => {
 });
 
 // Forçar health check manual
-app.post('/api/health/check', async (req, res) => {
+app.post('/api/health/check', async(req, res) => {
     console.log('[HealthCheck] Verificação manual solicitada');
-    
+
     try {
         await healthCheck();
         await checkMissingInstances();
-        
-        res.json({ 
-            success: true, 
+
+        res.json({
+            success: true,
             message: 'Health check executado',
             sessions: sessions.size
         });
@@ -1483,7 +1559,7 @@ app.post('/api/health/check', async (req, res) => {
 });
 
 // Get QR Code Image
-app.get('/api/session/qr/:id', async (req, res) => {
+app.get('/api/session/qr/:id', async(req, res) => {
     const instanceId = req.params.id;
     const session = sessions.get(instanceId);
 
@@ -1500,7 +1576,7 @@ app.get('/api/session/qr/:id', async (req, res) => {
 });
 
 // Send Message API (Updated for Multi-tenant)
-app.post('/api/agendar-text', async (req, res) => {
+app.post('/api/agendar-text', async(req, res) => {
     // Debug: Log completo do que está chegando
     console.log('[API] === REQUEST DEBUG ===');
     console.log('[API] Headers:', JSON.stringify(req.headers));
@@ -1569,7 +1645,7 @@ app.post('/api/agendar-text', async (req, res) => {
 });
 
 // Alias para /api/agendar-text (compatibilidade com texto.php)
-app.post('/api/send-text', async (req, res) => {
+app.post('/api/send-text', async(req, res) => {
     const { instance, to, message, token } = req.body;
 
     console.log(`[API send-text] Request received for instance: ${instance}, to: ${to}`);
@@ -1602,8 +1678,7 @@ app.post('/api/send-text', async (req, res) => {
             try {
                 await pool.execute(
                     `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
-                     VALUES (?, ?, ?, 'text', 'sent', NOW())`,
-                    [instance, phoneNumber, message]
+                     VALUES (?, ?, ?, 'text', 'sent', NOW())`, [instance, phoneNumber, message]
                 );
             } catch (dbErr) {
                 console.error('[API send-text] Error saving message to DB:', dbErr);
@@ -1626,7 +1701,7 @@ app.post('/api/send-text', async (req, res) => {
 // ========================================
 // ENVIAR MÍDIA/ARQUIVO PARA CONTATO
 // ========================================
-app.post('/api/send-media', upload.single('file'), async (req, res) => {
+app.post('/api/send-media', upload.single('file'), async(req, res) => {
     const { instance, to, caption, token, mediaUrl, mediaBase64, filename, mimetype } = req.body;
 
     console.log(`[API send-media] Request for instance: ${instance}, to: ${to}`);
@@ -1690,8 +1765,7 @@ app.post('/api/send-media', upload.single('file'), async (req, res) => {
                 const phoneNumber = to.replace(/\D/g, '');
                 await pool.execute(
                     `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
-                     VALUES (?, ?, ?, 'media', 'sent', NOW())`,
-                    [instance, phoneNumber, caption || '[MEDIA]']
+                     VALUES (?, ?, ?, 'media', 'sent', NOW())`, [instance, phoneNumber, caption || '[MEDIA]']
                 );
             } catch (dbErr) {
                 console.error('[API send-media] Error saving to DB:', dbErr);
@@ -1707,14 +1781,14 @@ app.post('/api/send-media', upload.single('file'), async (req, res) => {
         console.error(`[API send-media] Error:`, error);
         // Limpar arquivo temporário em caso de erro
         if (req.file) {
-            fs.unlink(req.file.path, () => { });
+            fs.unlink(req.file.path, () => {});
         }
         res.status(500).json({ error: error.message });
     }
 });
 
 // Rota para agendamento programado com confirmação (compatibilidade com confirmacao.php)
-app.post('/api/agendar-program', async (req, res) => {
+app.post('/api/agendar-program', async(req, res) => {
     const { instance, to, message, msg_erro, msg_confirma, msg_reagendar, id_consulta, url_recebe, data, aviso } = req.body;
 
     console.log(`[API agendar-program] Request received for instance: ${instance}, to: ${to}, id_consulta: ${id_consulta}`);
@@ -1748,8 +1822,7 @@ app.post('/api/agendar-program', async (req, res) => {
             try {
                 await pool.execute(
                     `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
-                     VALUES (?, ?, ?, 'text', 'sent', NOW())`,
-                    [instance, phoneNumber, message]
+                     VALUES (?, ?, ?, 'text', 'sent', NOW())`, [instance, phoneNumber, message]
                 );
                 console.log(`[API agendar-program] Message saved to DB`);
             } catch (dbErr) {
@@ -1773,8 +1846,7 @@ app.post('/api/agendar-program', async (req, res) => {
 
                 await pool.execute(
                     `INSERT INTO agendamentos (instance_id, to_number, message, scheduled_at, status, error_message) 
-                     VALUES (?, ?, ?, NOW(), 'pending', ?)`,
-                    [instance, phoneNumber, message, extraData]
+                     VALUES (?, ?, ?, NOW(), 'pending', ?)`, [instance, phoneNumber, message, extraData]
                 );
                 console.log(`[API agendar-program] Agendamento saved for id_consulta: ${id_consulta}`);
             } catch (dbErr) {
@@ -1836,7 +1908,7 @@ async function initGroupsTable() {
 }
 
 // 1. CRIAR GRUPO NO WHATSAPP
-app.post('/api/group/create', async (req, res) => {
+app.post('/api/group/create', async(req, res) => {
     const { instance, name, participants, description } = req.body;
 
     console.log(`[API Group] Creating group "${name}" for instance ${instance}`);
@@ -1872,14 +1944,12 @@ app.post('/api/group/create', async (req, res) => {
             await pool.execute(
                 `INSERT INTO whatsapp_groups (instance_id, group_id, name, description, created_by) 
                  VALUES (?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE name = ?, description = ?`,
-                [instance, groupId, name, description || '', session.client.info.wid.user, name, description || '']
+                 ON DUPLICATE KEY UPDATE name = ?, description = ?`, [instance, groupId, name, description || '', session.client.info.wid.user, name, description || '']
             );
 
             // Salvar membros
             const [groupRow] = await pool.execute(
-                'SELECT id FROM whatsapp_groups WHERE instance_id = ? AND group_id = ?',
-                [instance, groupId]
+                'SELECT id FROM whatsapp_groups WHERE instance_id = ? AND group_id = ?', [instance, groupId]
             );
 
             if (groupRow.length > 0 && result.participants) {
@@ -1889,8 +1959,7 @@ app.post('/api/group/create', async (req, res) => {
                     await pool.execute(
                         `INSERT INTO whatsapp_group_members (group_id, phone_number, is_admin) 
                          VALUES (?, ?, FALSE)
-                         ON DUPLICATE KEY UPDATE phone_number = ?`,
-                        [localGroupId, phone, phone]
+                         ON DUPLICATE KEY UPDATE phone_number = ?`, [localGroupId, phone, phone]
                     );
                 }
             }
@@ -1900,7 +1969,7 @@ app.post('/api/group/create', async (req, res) => {
             success: true,
             message: 'Grupo criado com sucesso',
             group: {
-                id: result.gid?._serialized || result.gid,
+                id: result.gid ? ._serialized || result.gid,
                 name: result.title || name,
                 participants: result.participants
             }
@@ -1912,7 +1981,7 @@ app.post('/api/group/create', async (req, res) => {
 });
 
 // 2. LISTAR GRUPOS DO WHATSAPP
-app.get('/api/group/list/:instance', async (req, res) => {
+app.get('/api/group/list/:instance', async(req, res) => {
     const { instance } = req.params;
 
     console.log(`[API Group] Listing groups for instance ${instance}`);
@@ -1929,7 +1998,7 @@ app.get('/api/group/list/:instance', async (req, res) => {
         const groupList = groups.map(g => ({
             id: g.id._serialized,
             name: g.name,
-            participantsCount: g.participants?.length || 0,
+            participantsCount: g.participants ? .length || 0,
             isReadOnly: g.isReadOnly,
             timestamp: g.timestamp
         }));
@@ -1946,7 +2015,7 @@ app.get('/api/group/list/:instance', async (req, res) => {
 });
 
 // 3. OBTER DETALHES DE UM GRUPO
-app.get('/api/group/info/:instance/:groupId', async (req, res) => {
+app.get('/api/group/info/:instance/:groupId', async(req, res) => {
     const { instance, groupId } = req.params;
 
     console.log(`[API Group] Getting info for group ${groupId}`);
@@ -1970,8 +2039,8 @@ app.get('/api/group/info/:instance/:groupId', async (req, res) => {
                 id: chat.id._serialized,
                 name: chat.name,
                 description: chat.description,
-                owner: chat.owner?._serialized,
-                participants: chat.participants?.map(p => ({
+                owner: chat.owner ? ._serialized,
+                participants: chat.participants ? .map(p => ({
                     id: p.id._serialized,
                     isAdmin: p.isAdmin,
                     isSuperAdmin: p.isSuperAdmin
@@ -1987,7 +2056,7 @@ app.get('/api/group/info/:instance/:groupId', async (req, res) => {
 });
 
 // 4. ADICIONAR PARTICIPANTES AO GRUPO
-app.post('/api/group/add-participants', async (req, res) => {
+app.post('/api/group/add-participants', async(req, res) => {
     const { instance, groupId, participants } = req.body;
 
     console.log(`[API Group] Adding participants to group ${groupId}`);
@@ -2063,7 +2132,7 @@ app.post('/api/group/add-participants', async (req, res) => {
 });
 
 // 5. REMOVER PARTICIPANTES DO GRUPO
-app.post('/api/group/remove-participants', async (req, res) => {
+app.post('/api/group/remove-participants', async(req, res) => {
     const { instance, groupId, participants } = req.body;
 
     console.log(`[API Group] Removing participants from group ${groupId}`);
@@ -2104,7 +2173,7 @@ app.post('/api/group/remove-participants', async (req, res) => {
 });
 
 // 6. ENVIAR MENSAGEM PARA GRUPO
-app.post('/api/group/send-message', async (req, res) => {
+app.post('/api/group/send-message', async(req, res) => {
     const { instance, groupId, message } = req.body;
 
     console.log(`[API Group] Sending message to group ${groupId}`);
@@ -2129,8 +2198,7 @@ app.post('/api/group/send-message', async (req, res) => {
         if (pool) {
             await pool.execute(
                 `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
-                 VALUES (?, ?, ?, 'group', 'sent', NOW())`,
-                [instance, groupId, message]
+                 VALUES (?, ?, ?, 'group', 'sent', NOW())`, [instance, groupId, message]
             );
         }
 
@@ -2146,7 +2214,7 @@ app.post('/api/group/send-message', async (req, res) => {
 });
 
 // 6.1 ENVIAR MÍDIA PARA GRUPO
-app.post('/api/group/send-media', upload.single('file'), async (req, res) => {
+app.post('/api/group/send-media', upload.single('file'), async(req, res) => {
     const { instance, groupId, caption, mediaUrl, mediaBase64, filename, mimetype } = req.body;
 
     console.log(`[API Group] Sending media to group ${groupId}`);
@@ -2196,8 +2264,7 @@ app.post('/api/group/send-media', upload.single('file'), async (req, res) => {
             try {
                 await pool.execute(
                     `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
-                     VALUES (?, ?, ?, 'group_media', 'sent', NOW())`,
-                    [instance, groupId, caption || '[MEDIA]']
+                     VALUES (?, ?, ?, 'group_media', 'sent', NOW())`, [instance, groupId, caption || '[MEDIA]']
                 );
             } catch (dbErr) {
                 console.error('[API Group] Error saving to DB:', dbErr);
@@ -2212,14 +2279,14 @@ app.post('/api/group/send-media', upload.single('file'), async (req, res) => {
     } catch (error) {
         console.error(`[API Group] Error sending media to group:`, error);
         if (req.file) {
-            fs.unlink(req.file.path, () => { });
+            fs.unlink(req.file.path, () => {});
         }
         res.status(500).json({ error: error.message });
     }
 });
 
 // 7. OBTER LINK DE CONVITE DO GRUPO
-app.get('/api/group/invite-link/:instance/:groupId', async (req, res) => {
+app.get('/api/group/invite-link/:instance/:groupId', async(req, res) => {
     const { instance, groupId } = req.params;
 
     console.log(`[API Group] Getting invite link for group ${groupId}`);
@@ -2251,7 +2318,7 @@ app.get('/api/group/invite-link/:instance/:groupId', async (req, res) => {
 });
 
 // 8. ATUALIZAR INFORMAÇÕES DO GRUPO (nome, descrição)
-app.post('/api/group/update', async (req, res) => {
+app.post('/api/group/update', async(req, res) => {
     const { instance, groupId, name, description } = req.body;
 
     console.log(`[API Group] Updating group ${groupId}`);
@@ -2297,7 +2364,7 @@ app.post('/api/group/update', async (req, res) => {
 });
 
 // 9. LISTAR GRUPOS SALVOS NO BANCO LOCAL (para o sistema PHP)
-app.get('/api/local-groups/:instance', async (req, res) => {
+app.get('/api/local-groups/:instance', async(req, res) => {
     const { instance } = req.params;
 
     if (!pool) {
@@ -2310,8 +2377,7 @@ app.get('/api/local-groups/:instance', async (req, res) => {
                     (SELECT COUNT(*) FROM whatsapp_group_members WHERE group_id = g.id) as member_count
              FROM whatsapp_groups g 
              WHERE g.instance_id = ? 
-             ORDER BY g.created_at DESC`,
-            [instance]
+             ORDER BY g.created_at DESC`, [instance]
         );
 
         res.json({
@@ -2326,7 +2392,7 @@ app.get('/api/local-groups/:instance', async (req, res) => {
 });
 
 // 10. SALVAR/CRIAR GRUPO LOCAL (para gerenciamento no PHP)
-app.post('/api/local-groups/create', async (req, res) => {
+app.post('/api/local-groups/create', async(req, res) => {
     const { instance, name, description, members } = req.body;
 
     if (!pool) {
@@ -2353,13 +2419,12 @@ app.post('/api/local-groups/create', async (req, res) => {
         }
 
         const result = await session.client.createGroup(name, participantList);
-        const groupId = result.gid?._serialized || result.gid;
+        const groupId = result.gid ? ._serialized || result.gid;
 
         // Salvar no banco local
         const [insertResult] = await pool.execute(
             `INSERT INTO whatsapp_groups (instance_id, group_id, name, description, created_by) 
-             VALUES (?, ?, ?, ?, ?)`,
-            [instance, groupId, name, description || '', session.client.info.wid.user]
+             VALUES (?, ?, ?, ?, ?)`, [instance, groupId, name, description || '', session.client.info.wid.user]
         );
 
         const localGroupId = insertResult.insertId;
@@ -2371,8 +2436,7 @@ app.post('/api/local-groups/create', async (req, res) => {
                 const memberName = member.name || '';
                 await pool.execute(
                     `INSERT INTO whatsapp_group_members (group_id, phone_number, name) 
-                     VALUES (?, ?, ?)`,
-                    [localGroupId, phone, memberName]
+                     VALUES (?, ?, ?)`, [localGroupId, phone, memberName]
                 );
             }
         }
@@ -2391,7 +2455,7 @@ app.post('/api/local-groups/create', async (req, res) => {
 });
 
 // 11. ADICIONAR MEMBRO AO GRUPO LOCAL
-app.post('/api/local-groups/add-member', async (req, res) => {
+app.post('/api/local-groups/add-member', async(req, res) => {
     const { localGroupId, phone, name } = req.body;
 
     if (!pool) {
@@ -2405,8 +2469,7 @@ app.post('/api/local-groups/add-member', async (req, res) => {
     try {
         // Buscar grupo local
         const [groups] = await pool.execute(
-            'SELECT * FROM whatsapp_groups WHERE id = ?',
-            [localGroupId]
+            'SELECT * FROM whatsapp_groups WHERE id = ?', [localGroupId]
         );
 
         if (groups.length === 0) {
@@ -2429,8 +2492,7 @@ app.post('/api/local-groups/add-member', async (req, res) => {
         await pool.execute(
             `INSERT INTO whatsapp_group_members (group_id, phone_number, name) 
              VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE name = ?`,
-            [localGroupId, phoneClean, name || '', name || '']
+             ON DUPLICATE KEY UPDATE name = ?`, [localGroupId, phoneClean, name || '', name || '']
         );
 
         res.json({
@@ -2444,7 +2506,7 @@ app.post('/api/local-groups/add-member', async (req, res) => {
 });
 
 // 12. LISTAR MEMBROS DE UM GRUPO LOCAL
-app.get('/api/local-groups/:localGroupId/members', async (req, res) => {
+app.get('/api/local-groups/:localGroupId/members', async(req, res) => {
     const { localGroupId } = req.params;
 
     if (!pool) {
@@ -2453,8 +2515,7 @@ app.get('/api/local-groups/:localGroupId/members', async (req, res) => {
 
     try {
         const [members] = await pool.execute(
-            'SELECT * FROM whatsapp_group_members WHERE group_id = ? ORDER BY added_at DESC',
-            [localGroupId]
+            'SELECT * FROM whatsapp_group_members WHERE group_id = ? ORDER BY added_at DESC', [localGroupId]
         );
 
         res.json({
@@ -2469,7 +2530,7 @@ app.get('/api/local-groups/:localGroupId/members', async (req, res) => {
 });
 
 // 13. ENVIAR MENSAGEM PARA GRUPO LOCAL (por ID local)
-app.post('/api/local-groups/send-message', async (req, res) => {
+app.post('/api/local-groups/send-message', async(req, res) => {
     const { localGroupId, message } = req.body;
 
     if (!pool) {
@@ -2483,8 +2544,7 @@ app.post('/api/local-groups/send-message', async (req, res) => {
     try {
         // Buscar grupo local
         const [groups] = await pool.execute(
-            'SELECT * FROM whatsapp_groups WHERE id = ?',
-            [localGroupId]
+            'SELECT * FROM whatsapp_groups WHERE id = ?', [localGroupId]
         );
 
         if (groups.length === 0) {
@@ -2503,8 +2563,7 @@ app.post('/api/local-groups/send-message', async (req, res) => {
         // Salvar no banco
         await pool.execute(
             `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
-             VALUES (?, ?, ?, 'group', 'sent', NOW())`,
-            [group.instance_id, group.group_id, message]
+             VALUES (?, ?, ?, 'group', 'sent', NOW())`, [group.instance_id, group.group_id, message]
         );
 
         res.json({
@@ -2531,7 +2590,7 @@ let deepHealthCheckInterval = null;
 async function healthCheck() {
     const now = Date.now();
     console.log(`[HealthCheck] 🏥 Verificando ${sessions.size} sessões...`);
-    
+
     for (const [instanceId, session] of sessions.entries()) {
         try {
             // 1. Verificar se o cliente existe
@@ -2550,7 +2609,7 @@ async function healthCheck() {
                 if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
                 sessions.delete(instanceId);
                 await updateInstanceStatus(instanceId, 0);
-                
+
                 // Reconectar com delay aleatório para evitar sobrecarga
                 const delay = 5000 + Math.random() * 5000;
                 setTimeout(() => {
@@ -2561,20 +2620,20 @@ async function healthCheck() {
                 }, delay);
                 continue;
             }
-            
+
             // 3. Verificar se a página está fechada
             if (session.client.pupPage && session.client.pupPage.isClosed()) {
                 console.log(`[HealthCheck] ${instanceId}: ❌ Página fechada`);
                 if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
                 if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
-                
+
                 try {
                     await session.client.destroy();
                 } catch (e) {}
-                
+
                 sessions.delete(instanceId);
                 await updateInstanceStatus(instanceId, 0);
-                
+
                 setTimeout(() => {
                     if (!sessions.has(instanceId)) {
                         startSession(instanceId);
@@ -2587,14 +2646,14 @@ async function healthCheck() {
             const inactiveTime = now - (session.lastActivity || now);
             if (session.status === 'CONNECTED' && inactiveTime > 180000) {
                 console.log(`[HealthCheck] ${instanceId}: ⚠️ Inativo há ${Math.round(inactiveTime/1000)}s, verificando...`);
-                
+
                 try {
                     // Tentar obter estado com timeout
                     const state = await Promise.race([
                         session.client.getState(),
                         new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 15000))
                     ]);
-                    
+
                     if (state === 'CONNECTED') {
                         session.lastActivity = now;
                         console.log(`[HealthCheck] ${instanceId}: ✅ Ainda conectado`);
@@ -2608,25 +2667,25 @@ async function healthCheck() {
                     }
                 } catch (e) {
                     console.log(`[HealthCheck] ${instanceId}: ❌ Não responde: ${e.message}`);
-                    
+
                     // Incrementar contador de falhas
                     session.consecutiveFailures = (session.consecutiveFailures || 0) + 1;
-                    
+
                     if (session.consecutiveFailures >= 2) {
                         // Limpar e reconectar
                         if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
                         if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
-                        
+
                         try {
                             await Promise.race([
                                 session.client.destroy(),
                                 new Promise(resolve => setTimeout(resolve, 5000))
                             ]);
                         } catch (destroyErr) {}
-                        
+
                         sessions.delete(instanceId);
                         await updateInstanceStatus(instanceId, 0);
-                        
+
                         setTimeout(() => {
                             if (!sessions.has(instanceId)) {
                                 startSession(instanceId);
@@ -2641,17 +2700,17 @@ async function healthCheck() {
                 const loadingTime = now - (session.loadingStartTime || now);
                 if (loadingTime > 120000) { // 2 minutos
                     console.log(`[HealthCheck] ${instanceId}: ❌ Travado em ${session.status} há ${Math.round(loadingTime/1000)}s`);
-                    
+
                     if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
                     if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
-                    
+
                     try {
                         await session.client.destroy();
                     } catch (e) {}
-                    
+
                     sessions.delete(instanceId);
                     await updateInstanceStatus(instanceId, 0);
-                    
+
                     // Reconectar após 20 segundos (reduzido de 30s)
                     setTimeout(() => {
                         if (!sessions.has(instanceId)) {
@@ -2660,7 +2719,7 @@ async function healthCheck() {
                     }, 20000);
                 }
             }
-            
+
             // 6. Verificar tempo desde último ping bem-sucedido
             if (session.status === 'CONNECTED' && session.lastPing) {
                 const timeSinceLastPing = now - session.lastPing;
@@ -2677,10 +2736,10 @@ async function healthCheck() {
 // Verificar instâncias que deveriam estar ativas mas não estão
 async function checkMissingInstances() {
     if (!pool) return;
-    
+
     try {
         const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
-        
+
         for (const row of rows) {
             if (!sessions.has(row.id)) {
                 console.log(`[HealthCheck] 🔄 Instância ${row.id} deveria estar ativa. Iniciando...`);
@@ -2697,29 +2756,29 @@ async function checkMissingInstances() {
 // Deep health check - verificação mais profunda a cada 5 minutos
 async function deepHealthCheck() {
     console.log(`[DeepHealthCheck] 🔬 Verificação profunda iniciada...`);
-    
+
     for (const [instanceId, session] of sessions.entries()) {
         if (session.status !== 'CONNECTED' || !session.client) continue;
-        
+
         try {
             // Verificar se consegue executar operações básicas
             const canOperate = await Promise.race([
-                (async () => {
+                (async() => {
                     // Tentar obter informações básicas
                     const state = await session.client.getState();
                     if (state !== 'CONNECTED') return false;
-                    
+
                     // Tentar verificar se o Store está disponível
                     const storeOk = await session.client.pupPage.evaluate(() => {
-                        return typeof window.Store !== 'undefined' && 
-                               typeof window.Store.Chat !== 'undefined';
+                        return typeof window.Store !== 'undefined' &&
+                            typeof window.Store.Chat !== 'undefined';
                     });
-                    
+
                     return storeOk;
                 })(),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 20000))
             ]);
-            
+
             if (!canOperate) {
                 console.log(`[DeepHealthCheck] ${instanceId}: ⚠️ Sessão não operacional`);
             } else {
@@ -2733,16 +2792,16 @@ async function deepHealthCheck() {
 
 function startHealthCheck() {
     // Health check a cada 45 segundos (reduzido de 1 minuto)
-    healthCheckInterval = setInterval(async () => {
+    healthCheckInterval = setInterval(async() => {
         await healthCheck();
         await checkMissingInstances();
     }, 45000); // 45 segundos
-    
+
     // Deep health check a cada 5 minutos
-    deepHealthCheckInterval = setInterval(async () => {
+    deepHealthCheckInterval = setInterval(async() => {
         await deepHealthCheck();
     }, 300000); // 5 minutos
-    
+
     console.log('[HealthCheck] 🏥 Sistema de monitoramento iniciado (intervalo: 45s, deep: 5min)');
 }
 
@@ -2761,15 +2820,15 @@ function stopHealthCheck() {
 // INICIALIZAÇÃO
 // ========================================
 
-(async () => {
+(async() => {
     await initDB();
     await initGroupsTable();
-    
+
     // Iniciar health check após 30 segundos (reduzido de 1 minuto)
     setTimeout(() => {
         startHealthCheck();
     }, 30000);
-    
+
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
         console.log(`\n📋 API de Grupos disponível:`);
