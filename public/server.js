@@ -1557,8 +1557,8 @@ app.get('/api/health', (req, res) => {
         id,
         status: session.status,
         hasClient: !!session.client,
-        hasBrowser: session.client ? .pupBrowser ? .isConnected() || false,
-        hasPage: session.client ? .pupPage && !session.client ? .pupPage ? .isClosed() || false,
+        hasBrowser: session.client && session.client.pupBrowser ? session.client.pupBrowser.isConnected() : false,
+        hasPage: session.client && session.client.pupPage ? !session.client.pupPage.isClosed() : false,
         lastActivity: session.lastActivity ? Math.round((now - session.lastActivity) / 1000) + 's ago' : 'N/A',
         lastPing: session.lastPing ? Math.round((now - session.lastPing) / 1000) + 's ago' : 'N/A',
         consecutiveFailures: session.consecutiveFailures || 0,
@@ -2074,7 +2074,7 @@ app.post('/api/group/create', async(req, res) => {
             success: true,
             message: 'Grupo criado com sucesso',
             group: {
-                id: result.gid ? ._serialized || result.gid,
+                id: result.gid && result.gid._serialized ? result.gid._serialized : result.gid,
                 name: result.title || name,
                 participants: result.participants
             }
@@ -2103,7 +2103,7 @@ app.get('/api/group/list/:instance', async(req, res) => {
         const groupList = groups.map(g => ({
             id: g.id._serialized,
             name: g.name,
-            participantsCount: g.participants ? .length || 0,
+            participantsCount: g.participants ? g.participants.length : 0,
             isReadOnly: g.isReadOnly,
             timestamp: g.timestamp
         }));
@@ -2144,8 +2144,8 @@ app.get('/api/group/info/:instance/:groupId', async(req, res) => {
                 id: chat.id._serialized,
                 name: chat.name,
                 description: chat.description,
-                owner: chat.owner ? ._serialized,
-                participants: chat.participants ? .map(p => ({
+                owner: chat.owner ?.id ?._serialized,
+                participants: chat.participants ?.map(p => ({
                     id: p.id._serialized,
                     isAdmin: p.isAdmin,
                     isSuperAdmin: p.isSuperAdmin
@@ -2524,7 +2524,7 @@ app.post('/api/local-groups/create', async(req, res) => {
         }
 
         const result = await session.client.createGroup(name, participantList);
-        const groupId = result.gid ? ._serialized || result.gid;
+        const groupId = result.gid ?._serialized || result.gid;
 
         // Salvar no banco local
         const [insertResult] = await pool.execute(
