@@ -126,6 +126,9 @@ app.get('/dashboard', requireAuth, (req, res) => {
 // Criar Nova Instância (API)
 app.post('/api/instance/create', async(req, res) => {
     const { name, sistema_php_url, webhook } = req.body;
+
+    console.log('[CREATE INSTANCE] Dados recebidos:', { name, sistema_php_url, webhook });
+
     if (!name || !sistema_php_url) return res.status(400).json({ error: 'Nome e URL do Sistema são obrigatórios' });
 
     if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
@@ -143,16 +146,22 @@ app.post('/api/instance/create', async(req, res) => {
         const id = crypto.randomUUID();
         const token = crypto.randomBytes(32).toString('hex');
 
+        console.log('[CREATE INSTANCE] Inserindo no banco:', { id, name, sistema_php_url });
+
         await pool.execute(
             'INSERT INTO instances (id, name, sistema_php_url, webhook, api_token, status) VALUES (?, ?, ?, ?, ?, 0)', [id, name, sistema_php_url, webhook || null, token]
         );
 
+        // Verificar se foi salvo corretamente
+        const [verify] = await pool.execute('SELECT id, name FROM instances WHERE id = ?', [id]);
+        console.log('[CREATE INSTANCE] Verificação após INSERT:', verify[0]);
+
         // Auto-start
         startSession(id);
 
-        res.json({ success: true, message: 'Instância criada com sucesso!', id });
+        res.json({ success: true, message: 'Instância criada com sucesso!', id, name });
     } catch (err) {
-        console.error(err);
+        console.error('[CREATE INSTANCE] ERRO:', err);
         res.status(500).json({ error: 'Erro ao criar instância: ' + err.message });
     }
 });
@@ -600,7 +609,12 @@ async function initDB() {
             console.log('Column "name" added to instances table');
         } catch (e) {
             // Coluna já existe, ignorar erro
+            console.log('Column "name" already exists or error:', e.code || e.message);
         }
+
+        // Verificar estrutura da tabela
+        const [columns] = await pool.execute('SHOW COLUMNS FROM instances');
+        console.log('[DB] Colunas da tabela instances:', columns.map(c => c.Field).join(', '));
 
         // 1. Criar tabela de usuários se não existir
         await pool.execute(`
