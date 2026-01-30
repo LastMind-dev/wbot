@@ -2150,8 +2150,8 @@ app.get('/api/group/info/:instance/:groupId', async(req, res) => {
                 id: chat.id._serialized,
                 name: chat.name,
                 description: chat.description,
-                owner: chat.owner ? .id ? ._serialized,
-                participants: chat.participants ? .map(p => ({
+                owner: chat.owner?.id?._serialized,
+                participants: chat.participants?.map(p => ({
                     id: p.id._serialized,
                     isAdmin: p.isAdmin,
                     isSuperAdmin: p.isSuperAdmin
@@ -2530,7 +2530,7 @@ app.post('/api/local-groups/create', async(req, res) => {
         }
 
         const result = await session.client.createGroup(name, participantList);
-        const groupId = result.gid ? ._serialized || result.gid;
+        const groupId = result.gid?._serialized || result.gid;
 
         // Salvar no banco local
         const [insertResult] = await pool.execute(
