@@ -233,6 +233,7 @@ function renderFullInstancesTable() {
                 <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${inst.phpUrl || '---'}</td>
                 <td><span class="status-badge ${statusClass}">${inst.status}</span></td>
                 <td class="uk-text-right">
+                    <button class="uk-button uk-button-small uk-button-secondary action-btn" onclick="showInstanceInfo('${inst.id}')" title="Informações API"><span uk-icon="icon: info; ratio: 0.8"></span></button>
                     ${inst.status === 'QR_CODE' ? `<button class="uk-button uk-button-small uk-button-default action-btn" onclick="showQrCode('${inst.id}')" title="Ver QR Code"><span uk-icon="icon: camera; ratio: 0.8"></span></button>` : ''}
                     ${inst.status === 'DISCONNECTED' || inst.status === 'AUTH_FAILURE' ? `<button class="uk-button uk-button-small uk-button-primary action-btn" onclick="startSession('${inst.id}')" title="Iniciar"><span uk-icon="icon: play; ratio: 0.8"></span></button>` : ''}
                     ${inst.status === 'CONNECTED' || inst.status === 'INITIALIZING' ? `<button class="uk-button uk-button-small uk-button-warning action-btn" onclick="stopSession('${inst.id}')" title="Parar"><span uk-icon="icon: ban; ratio: 0.8"></span></button>` : ''}
@@ -1190,5 +1191,41 @@ function showNotification(message, type = 'info') {
         status: type === 'error' ? 'danger' : type,
         pos: 'top-right',
         timeout: 3000
+    });
+}
+
+// Mostrar informações da instância para integração com API
+function showInstanceInfo(instanceId) {
+    const instance = instances.find(i => i.id === instanceId);
+    if (!instance) {
+        showNotification('Instância não encontrada', 'error');
+        return;
+    }
+    
+    // Gerar token baseado no ID da instância (ou usar token existente)
+    const token = instance.token || instanceId;
+    
+    // Buscar o primeiro grupo conectado como DEFAULT_GROUP_ID
+    let defaultGroupId = '---';
+    if (groups.length > 0) {
+        defaultGroupId = groups[0].id;
+    }
+    
+    // Preencher modal
+    document.getElementById('info-instance-id').textContent = instanceId;
+    document.getElementById('info-instance-token').textContent = token;
+    document.getElementById('info-default-group').textContent = defaultGroupId;
+    
+    // Abrir modal
+    UIkit.modal('#modal-instance-info').show();
+}
+
+// Copiar texto para clipboard
+function copyToClipboard(elementId) {
+    const text = document.getElementById(elementId).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        showNotification('Copiado para a área de transferência!', 'success');
+    }).catch(() => {
+        showNotification('Erro ao copiar', 'error');
     });
 }
