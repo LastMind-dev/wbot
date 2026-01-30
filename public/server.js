@@ -1,1 +1,3004 @@
--NoNewline
+const { Client, LocalAuth, MessageMedia } = require('./index');
+const express = require('express');
+const mysql = require('mysql2/promise');
+const axios = require('axios');
+const qrcode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const session = require('express-session');
+const bcrypt = require('bcryptjs');
+const helmet = require('helmet');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const multer = require('multer');
+require('dotenv').config();
+
+// ========================================
+// TRATAMENTO DE ERROS GLOBAIS
+// ========================================
+process.on('uncaughtException', (err) => {
+    console.error('❌ Uncaught Exception:', err);
+    // Não derrubar o processo, apenas logar
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    // Não derrubar o processo, apenas logar
+});
+
+// ========================================
+// CONFIGURAÇÃO MULTER PARA UPLOAD DE ARQUIVOS
+// ========================================
+const uploadDir = path.join(__dirname, 'tmp', 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 16 * 1024 * 1024 }, // 16MB (limite WhatsApp)
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = [
+            // Imagens
+            'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+            // Documentos
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.ms-excel',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'text/plain',
+            // Áudio
+            'audio/mpeg', 'audio/ogg', 'audio/wav',
+            // Vídeo
+            'video/mp4', 'video/mpeg'
+        ];
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Tipo de arquivo não suportado: ' + file.mimetype), false);
+        }
+    }
+});
+
+const app = express();
+
+// 1. Security Headers (Helmet)
+// Desativando CSP por enquanto para permitir scripts/estilos inline existentes
+app.use(helmet({
+    contentSecurityPolicy: false,
+}));
+
+// 2. CORS (Permitir acesso de outros domínios se necessário, ajuste a origin conforme produção)
+app.use(cors());
+
+// 3. Rate Limiting (Proteção contra Bruteforce/DDoS)
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 100, // limite de 100 requisições por IP
+    message: 'Muitas requisições deste IP, tente novamente mais tarde.'
+});
+app.use(limiter);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static('public'));
+
+// Configuração de Sessão (Segurança)
+app.use(session({
+    secret: process.env.JWT_SECRET || 'segredo_padrao_super_seguro',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 3600000 } // 1 hora
+}));
+
+// Rota raiz para verificar se a API está online
+app.get('/', (req, res) => {
+    res.send(`
+        <div style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+            <h1>🤖 WhatsApp Bot API Online</h1>
+            <p>Status: <strong>Operacional</strong></p>
+            <p>Instâncias Ativas: ${sessions.size}</p>
+            <br>
+            <a href="/dashboard.html" style="background: #4c3b94; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Dashboard Principal</a>
+            <a href="/admin" style="background: #25D366; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Instâncias</a>
+            <a href="/grupos.html" style="background: #6f42c1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Grupos</a>
+        </div>
+    `);
+});
+
+// Dashboard Principal (Nova Interface UIkit)
+app.get('/dashboard', requireAuth, (req, res) => {
+    res.sendFile(__dirname + '/public/dashboard.html');
+});
+
+// Criar Nova Instância (API)
+app.post('/api/instance/create', async(req, res) => {
+    const { name, sistema_php_url, webhook } = req.body;
+    if (!name || !sistema_php_url) return res.status(400).json({ error: 'Nome e URL do Sistema são obrigatórios' });
+
+    if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
+
+    try {
+        // Verificar se já existe instância com mesmo nome E mesma URL
+        const [existing] = await pool.execute(
+            'SELECT id FROM instances WHERE name = ? AND sistema_php_url = ?', [name, sistema_php_url]
+        );
+
+        if (existing.length > 0) {
+            return res.status(400).json({ error: 'Já existe uma instância com este nome e URL do Sistema PHP.' });
+        }
+
+        const id = crypto.randomUUID();
+        const token = crypto.randomBytes(32).toString('hex');
+
+        await pool.execute(
+            'INSERT INTO instances (id, name, sistema_php_url, webhook, api_token, status) VALUES (?, ?, ?, ?, ?, 0)', [id, name, sistema_php_url, webhook || null, token]
+        );
+
+        // Auto-start
+        startSession(id);
+
+        res.json({ success: true, message: 'Instância criada com sucesso!', id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Erro ao criar instância: ' + err.message });
+    }
+});
+
+// Deletar Instância (API)
+app.delete('/api/instance/:id', async(req, res) => {
+    const { id } = req.params;
+
+    if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
+
+    try {
+        // Parar sessão se estiver ativa
+        const session = sessions.get(id);
+        if (session && session.client) {
+            try {
+                await session.client.destroy();
+            } catch (e) {
+                console.error(`Erro ao destruir cliente ${id}:`, e.message);
+            }
+            sessions.delete(id);
+        }
+
+        // Deletar do banco de dados
+        const [result] = await pool.execute('DELETE FROM instances WHERE id = ?', [id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Instância não encontrada' });
+        }
+
+        // Tentar deletar pasta de sessão (LocalAuth)
+        const fs = require('fs');
+        const path = require('path');
+        const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${id}`);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log(`[${id}] Pasta de sessão deletada`);
+        }
+
+        res.json({ success: true, message: 'Instância deletada com sucesso!' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Erro ao deletar instância: ' + err.message });
+    }
+});
+
+// --- ROTAS DE LOGIN ---
+
+app.get('/login', (req, res) => {
+    res.send(`
+        <html>
+        <head>
+            <title>Login - WhatsApp Manager</title>
+            <style>
+                body { font-family: 'Segoe UI', sans-serif; background: #4c3b94; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .login-box { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); width: 300px; text-align: center; }
+                input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
+                button { width: 100%; padding: 12px; background: #6f42c1; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+                button:hover { background: #5a32a3; }
+                .error { color: red; font-size: 0.9em; display: none; }
+            </style>
+        </head>
+        <body>
+            <div class="login-box">
+                <h2>🤖 Acesso Restrito</h2>
+                <form action="/login" method="POST">
+                    <input type="text" name="username" placeholder="Usuário" required>
+                    <input type="password" name="password" placeholder="Senha" required>
+                    <button type="submit">Entrar</button>
+                </form>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+app.post('/login', async(req, res) => {
+    const { username, password } = req.body;
+
+    if (!pool) return res.send('Erro de conexão com banco');
+
+    try {
+        const [users] = await pool.execute('SELECT * FROM users WHERE username = ?', [username]);
+
+        if (users.length > 0) {
+            const user = users[0];
+            const validPassword = await bcrypt.compare(password, user.password);
+
+            if (validPassword) {
+                req.session.user = { id: user.id, username: user.username };
+                return res.redirect('/admin');
+            }
+        }
+        res.send('<script>alert("Usuário ou senha inválidos"); window.location.href="/login";</script>');
+    } catch (err) {
+        res.send('Erro ao logar: ' + err.message);
+    }
+});
+
+app.get('/logout', (req, res) => {
+    req.session.destroy();
+    res.redirect('/login');
+});
+
+// Middleware de Autenticação
+function requireAuth(req, res, next) {
+    if (!req.session.user) return res.redirect('/login');
+    next();
+}
+
+// Dashboard Administrativo
+app.get('/admin', requireAuth, async(req, res) => {
+    if (!pool) return res.send('Erro: Banco de dados não conectado.');
+
+    try {
+        const [instances] = await pool.execute('SELECT * FROM instances ORDER BY created_at DESC');
+
+        let html = `
+            <html>
+            <head>
+                <title>Gerenciador de Instâncias WhatsApp</title>
+                <meta charset="UTF-8">
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #4c3b94; margin: 0; padding: 20px; color: #333; }
+                    .container { max-width: 1000px; margin: 0 auto; }
+                    h1 { color: white; text-align: center; margin-bottom: 30px; }
+                    .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); margin-bottom: 20px; }
+                    
+                    /* Formulário */
+                    .form-group { margin-bottom: 15px; }
+                    .form-group label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+                    .form-control { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; box-sizing: border-box; }
+                    .btn-create { background: #6f42c1; color: white; width: 100%; padding: 12px; font-size: 16px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; transition: background 0.3s; }
+                    .btn-create:hover { background: #5a32a3; }
+
+                    /* Lista */
+                    .instance-item { border-bottom: 1px solid #eee; padding: 15px 0; display: flex; justify-content: space-between; align-items: center; }
+                    .instance-info strong { font-size: 1.1em; color: #333; }
+                    .instance-info small { color: #777; display: block; margin-top: 4px; }
+                    .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; color: white; margin-left: 5px; font-size: 13px; }
+                    .btn-start { background: #25D366; }
+                    .btn-stop { background: #dc3545; }
+                    .btn-qr { background: #0dcaf0; color: #000; }
+                    
+                    .status-badge { padding: 5px 10px; border-radius: 15px; font-size: 0.8em; font-weight: bold; text-transform: uppercase; }
+                    .status-connected { background: #d1e7dd; color: #0f5132; }
+                    .status-disconnected { background: #f8d7da; color: #842029; }
+                    .status-qr { background: #cff4fc; color: #055160; }
+
+                    .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
+                    .modal { background: white; padding: 20px; border-radius: 8px; width: 300px; text-align: center; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🤖 Dashboard WhatsApp</h1>
+                    
+                    <!-- Formulário de Criação -->
+                    <div class="card">
+                        <h2 style="margin-top: 0; color: #4c3b94;">+ Nova Instância WhatsApp</h2>
+                        <form id="createForm">
+                            <div class="form-group">
+                                <label>Nome da Instância *</label>
+                                <input type="text" name="name" class="form-control" placeholder="Ex: Atendimento Principal" required>
+                            </div>
+                            <div class="form-group">
+                                <label>URL do Sistema PHP *</label>
+                                <input type="url" name="sistema_php_url" class="form-control" placeholder="https://seu-sistema.com/api/retorno.php" value="${process.env.SISTEMA_PHP_URL || ''}" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Webhook (Opcional)</label>
+                                <input type="url" name="webhook" class="form-control" placeholder="https://seu-sistema.com/webhook">
+                            </div>
+                            <button type="submit" class="btn-create">Criar e Conectar</button>
+                        </form>
+                    </div>
+
+                    <!-- Lista de Instâncias -->
+                    <div class="card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                            <h2 style="margin: 0;">Minhas Instâncias</h2>
+                            <button onclick="location.reload()" class="btn" style="background: #6c757d;">Atualizar</button>
+                        </div>
+        `;
+
+        if (instances.length === 0) {
+            html += '<p style="text-align: center; color: #777;">Nenhuma instância encontrada.</p>';
+        } else {
+            instances.forEach(inst => {
+                const session = sessions.get(inst.id);
+                const status = session ? session.status : 'DISCONNECTED';
+                let statusClass = 'status-disconnected';
+                if (status === 'CONNECTED') statusClass = 'status-connected';
+                if (status === 'QR_CODE') statusClass = 'status-qr';
+                if (status.startsWith('LOADING_')) statusClass = 'status-qr';
+                if (status === 'INITIALIZING') statusClass = 'status-qr';
+
+                let actions = '';
+                // Botão de deletar sempre visível
+                const deleteBtn = `<button onclick="deleteInstance('${inst.id}', '${inst.name}')" class="btn" style="background: #721c24; color: #fff; font-size: 11px;" title="Deletar instância">🗑️</button>`;
+
+                if (status === 'DISCONNECTED' || status === 'AUTH_FAILURE' || status === 'INIT_ERROR') {
+                    actions = `<button onclick="controlSession('${inst.id}', 'start')" class="btn btn-start">Iniciar</button>`;
+                    actions += `<button onclick="resetSession('${inst.id}')" class="btn" style="background: #ffc107; color: #000;">Reset</button>`;
+                    actions += `<button onclick="fullResetSession('${inst.id}')" class="btn" style="background: #dc3545; color: #fff; font-size: 11px;">Reset Total</button>`;
+                } else if (status === 'INITIALIZING' || status.startsWith('LOADING_') || status === 'SYNC_TIMEOUT') {
+                    actions = `<button onclick="controlSession('${inst.id}', 'stop')" class="btn btn-stop">Parar</button>`;
+                    actions += `<button onclick="reconnectSession('${inst.id}')" class="btn" style="background: #17a2b8; color: #fff;">Reconectar</button>`;
+                    actions += `<button onclick="resetSession('${inst.id}')" class="btn" style="background: #ffc107; color: #000;">Reset</button>`;
+                } else if (status === 'CONNECTED') {
+                    actions = `<button onclick="controlSession('${inst.id}', 'stop')" class="btn btn-stop">Parar</button>`;
+                    actions += `<button onclick="reconnectSession('${inst.id}')" class="btn" style="background: #17a2b8; color: #fff;">Reconectar</button>`;
+                } else {
+                    actions = `<button onclick="controlSession('${inst.id}', 'stop')" class="btn btn-stop">Parar</button>`;
+                    if (status === 'QR_CODE') {
+                        actions += `<button onclick="showQr('${inst.id}')" class="btn btn-qr">Ver QR Code</button>`;
+                    }
+                    actions += `<button onclick="reconnectSession('${inst.id}')" class="btn" style="background: #17a2b8; color: #fff;">Reconectar</button>`;
+                    actions += `<button onclick="resetSession('${inst.id}')" class="btn" style="background: #ffc107; color: #000;">Reset</button>`;
+                }
+                actions += deleteBtn;
+
+                html += `
+                    <div class="instance-item" data-id="${inst.id}">
+                        <div class="instance-info">
+                            <strong>${inst.name}</strong> <span class="status-badge ${statusClass}">${status}</span>
+                            <small>ID: ${inst.id}</small>
+                            <small>Tel: ${inst.phone_number || '---'}</small>
+                            <small>PHP: ${inst.sistema_php_url}</small>
+                        </div>
+                        <div class="actions-div">${actions}</div>
+                    </div>
+                `;
+            });
+        }
+
+        html += `
+                    </div>
+                </div>
+
+                <div id="qrModal" class="modal-overlay">
+                    <div class="modal">
+                        <h3>Escaneie o QR Code</h3>
+                        <div id="qrContent"></div>
+                        <br>
+                        <button onclick="closeQr()" class="btn" style="background: #ccc; color: #333;">Fechar</button>
+                    </div>
+                </div>
+
+                <script>
+                    // Criar Instância
+                    document.getElementById('createForm').onsubmit = async (e) => {
+                        e.preventDefault();
+                        const formData = new FormData(e.target);
+                        const data = Object.fromEntries(formData);
+                        
+                        const btn = e.target.querySelector('button');
+                        const originalText = btn.innerText;
+                        btn.innerText = 'Criando...';
+                        btn.disabled = true;
+
+                        try {
+                            const res = await fetch('/api/instance/create', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(data)
+                            });
+                            const result = await res.json();
+                            if (result.success) {
+                                alert('Instância criada! Iniciando conexão...');
+                                location.reload();
+                            } else {
+                                alert('Erro: ' + result.error);
+                            }
+                        } catch (err) {
+                            alert('Erro de conexão');
+                        } finally {
+                            btn.innerText = originalText;
+                            btn.disabled = false;
+                        }
+                    };
+
+                    async function controlSession(id, action) {
+                        const res = await fetch('/api/session/' + action, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ instanceId: id })
+                        });
+                        const data = await res.json();
+                        // alert(data.message);
+                        location.reload();
+                    }
+
+                    function showQr(id) {
+                        document.getElementById('qrContent').innerHTML = '<img src="/api/session/qr/' + id + '" style="width:100%">';
+                        document.getElementById('qrModal').style.display = 'flex';
+                        // Refresh QR automatically every 10s? Maybe later.
+                    }
+                    
+                    function closeQr() {
+                        document.getElementById('qrModal').style.display = 'none';
+                        location.reload();
+                    }
+
+                    async function resetSession(id) {
+                        if (!confirm('Tem certeza que deseja resetar esta sessão? Isso irá apagar os dados de autenticação e você precisará escanear o QR Code novamente.')) {
+                            return;
+                        }
+                        
+                        try {
+                            const res = await fetch('/api/session/reset', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ instanceId: id })
+                            });
+                            const data = await res.json();
+                            alert(data.message || data.error);
+                            location.reload();
+                        } catch (err) {
+                            alert('Erro ao resetar sessão: ' + err.message);
+                        }
+                    }
+
+                    async function fullResetSession(id) {
+                        if (!confirm('ATENÇÃO: Reset completo irá apagar a sessão E o cache do WhatsApp Web. Use apenas se o reset normal não funcionar. Continuar?')) {
+                            return;
+                        }
+                        
+                        try {
+                            const res = await fetch('/api/session/full-reset', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ instanceId: id })
+                            });
+                            const data = await res.json();
+                            alert(data.message || data.error);
+                            location.reload();
+                        } catch (err) {
+                            alert('Erro ao resetar sessão: ' + err.message);
+                        }
+                    }
+
+                    async function reconnectSession(id) {
+                        if (!confirm('Deseja forçar reconexão desta instância?')) {
+                            return;
+                        }
+                        
+                        try {
+                            const res = await fetch('/api/session/reconnect', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ instanceId: id })
+                            });
+                            const data = await res.json();
+                            alert(data.message || data.error);
+                            setTimeout(() => location.reload(), 3000);
+                        } catch (err) {
+                            alert('Erro ao reconectar: ' + err.message);
+                        }
+                    }
+
+                    async function deleteInstance(id, name) {
+                        if (!confirm('⚠️ ATENÇÃO: Você está prestes a DELETAR permanentemente a instância "' + name + '".\\n\\nIsso irá:\\n- Parar a sessão\\n- Apagar todos os dados de autenticação\\n- Remover do banco de dados\\n\\nEsta ação NÃO pode ser desfeita!\\n\\nDeseja continuar?')) {
+                            return;
+                        }
+                        
+                        try {
+                            const res = await fetch('/api/instance/' + id, {
+                                method: 'DELETE'
+                            });
+                            const data = await res.json();
+                            if (data.success) {
+                                alert('✅ Instância deletada com sucesso!');
+                                location.reload();
+                            } else {
+                                alert('Erro: ' + data.error);
+                            }
+                        } catch (err) {
+                            alert('Erro ao deletar instância: ' + err.message);
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+        `;
+
+        res.send(html);
+    } catch (err) {
+        res.send('Erro ao buscar instâncias: ' + err.message);
+    }
+});
+
+// Database Connection
+const dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'usr_wbot1',
+    password: process.env.DB_PASSWORD || '7Rv4O&2flvuG0utpf',
+    database: process.env.DB_NAME || 'tabel_wbot1'
+};
+
+console.log('--- DEBUG DB CONFIG ---');
+console.log('Host:', dbConfig.host);
+console.log('User:', dbConfig.user);
+console.log('Database:', dbConfig.database);
+// Log mascarado da senha para segurança
+console.log('Password Length:', dbConfig.password ? dbConfig.password.length : 0);
+console.log('-----------------------');
+
+let pool;
+
+// Store active sessions
+// Map<instanceId, { client: Client, qr: string|null, status: string }>
+const sessions = new Map();
+
+// Middleware de Autenticação
+function requireAuth(req, res, next) {
+    if (req.session && req.session.user) {
+        return next();
+    }
+    res.redirect('/login');
+}
+
+async function initDB() {
+    try {
+        pool = mysql.createPool(dbConfig);
+        console.log('Database pool created');
+
+        // 1. Criar tabela de usuários se não existir
+        await pool.execute(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(255) NOT NULL UNIQUE,
+                password VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // 2. Verificar se existe usuário admin
+        const [users] = await pool.execute('SELECT * FROM users WHERE username = ?', ['admin']);
+        if (users.length === 0) {
+            // Gerar senha aleatória segura em vez de 'admin'
+            const randomPassword = crypto.randomBytes(8).toString('hex');
+            const salt = await bcrypt.genSalt(10);
+            const hash = await bcrypt.hash(randomPassword, salt);
+
+            await pool.execute('INSERT INTO users (username, password) VALUES (?, ?)', ['admin', hash]);
+
+            console.log('\n=============================================================');
+            console.log('⚠️  USUÁRIO ADMIN CRIADO COM SUCESSO');
+            console.log(`👤 Usuário: admin`);
+            console.log(`🔑 Senha Gerada: ${randomPassword}`);
+            console.log('⚠️  GUARDE ESTA SENHA! ELA NÃO SERÁ EXIBIDA NOVAMENTE.');
+            console.log('=============================================================\n');
+        }
+
+        // Auto-start instances that are marked as connected (status = 1)
+        const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
+        console.log(`Found ${rows.length} active instances to restore.`);
+
+        for (const row of rows) {
+            startSession(row.id);
+        }
+    } catch (err) {
+        console.error('Database initialization error:', err);
+    }
+}
+
+async function updateInstanceStatus(instanceId, status, phoneNumber = null) {
+    if (!pool) return;
+    try {
+        let query = 'UPDATE instances SET status = ?, last_connection = NOW()';
+        const params = [status];
+
+        if (phoneNumber) {
+            query += ', phone_number = ?';
+            params.push(phoneNumber);
+        }
+
+        query += ' WHERE id = ?';
+        params.push(instanceId);
+
+        await pool.execute(query, params);
+    } catch (error) {
+        console.error(`Error updating status for ${instanceId}:`, error);
+    }
+}
+
+async function startSession(instanceId) {
+    if (sessions.has(instanceId)) {
+        const session = sessions.get(instanceId);
+        if (session.client) {
+            console.log(`Session ${instanceId} already active`);
+            return session;
+        }
+    }
+
+    console.log(`Starting session for ${instanceId}`);
+
+    const client = new Client({
+        authStrategy: new LocalAuth({ clientId: instanceId }),
+        puppeteer: {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-software-rasterizer',
+                '--disable-background-networking',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--metrics-recording-only',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--safebrowsing-disable-auto-update',
+                // Melhorias para estabilidade de conexão
+                '--disable-features=TranslateUI',
+                '--disable-ipc-flooding-protection',
+                '--disable-renderer-backgrounding',
+                '--enable-features=NetworkService,NetworkServiceInProcess',
+                '--force-color-profile=srgb'
+            ]
+        },
+        // IMPORTANTE: Tomar controle quando houver conflito
+        takeoverOnConflict: true,
+        takeoverTimeoutMs: 5000, // Aumentado para dar mais tempo
+        // Timeout para autenticação (0 = infinito)
+        authTimeoutMs: 0,
+        // Máximo de tentativas de QR (0 = infinito)
+        qrMaxRetries: 0,
+        // User-Agent mais recente
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        // Configurações adicionais para estabilidade
+        restartOnAuthFail: true
+    });
+
+    // Initialize session state
+    sessions.set(instanceId, {
+        client: client,
+        qr: null,
+        status: 'INITIALIZING',
+        loadingStartTime: Date.now(),
+        keepAliveInterval: null,
+        connectionMonitorInterval: null,
+        lastActivity: Date.now(),
+        lastPing: Date.now(),
+        reconnectAttempts: 0,
+        consecutiveFailures: 0,
+        isReconnecting: false
+    });
+
+    // ========================================
+    // SISTEMA DE KEEP-ALIVE APRIMORADO
+    // ========================================
+    const startKeepAlive = () => {
+        const session = sessions.get(instanceId);
+        if (!session) return;
+
+        // Limpar intervalos anteriores se existirem
+        if (session.keepAliveInterval) {
+            clearInterval(session.keepAliveInterval);
+        }
+        if (session.connectionMonitorInterval) {
+            clearInterval(session.connectionMonitorInterval);
+        }
+
+        // Ping a cada 20 segundos para manter conexão ativa (reduzido de 30s)
+        session.keepAliveInterval = setInterval(async() => {
+            const currentSession = sessions.get(instanceId);
+            if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
+                return;
+            }
+
+            try {
+                // Verificar se o browser ainda está conectado
+                if (!currentSession.client.pupBrowser || !currentSession.client.pupBrowser.isConnected()) {
+                    console.log(`[${instanceId}] Keep-Alive: Browser desconectado, iniciando reconexão...`);
+                    clearInterval(currentSession.keepAliveInterval);
+                    await handleConnectionLoss(instanceId, 'BROWSER_DISCONNECTED');
+                    return;
+                }
+
+                // Verificar se a página ainda está ativa
+                if (!currentSession.client.pupPage || currentSession.client.pupPage.isClosed()) {
+                    console.log(`[${instanceId}] Keep-Alive: Página fechada, iniciando reconexão...`);
+                    clearInterval(currentSession.keepAliveInterval);
+                    await handleConnectionLoss(instanceId, 'PAGE_CLOSED');
+                    return;
+                }
+
+                // Ping simples para manter a conexão
+                const state = await Promise.race([
+                    currentSession.client.getState(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 15000))
+                ]);
+
+                currentSession.lastActivity = Date.now();
+                currentSession.lastPing = Date.now();
+                currentSession.consecutiveFailures = 0; // Reset contador de falhas
+
+                if (state !== 'CONNECTED') {
+                    console.log(`[${instanceId}] Keep-Alive: Estado atual = ${state}`);
+
+                    // Se estado for CONFLICT, tentar takeover
+                    if (state === 'CONFLICT') {
+                        console.log(`[${instanceId}] Keep-Alive: Detectado conflito, tentando takeover...`);
+                        try {
+                            await currentSession.client.pupPage.evaluate(() => window.Store.AppState.takeover());
+                        } catch (takeoverErr) {
+                            console.error(`[${instanceId}] Erro no takeover:`, takeoverErr.message);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`[${instanceId}] Keep-Alive Error:`, err.message);
+                const currentSession = sessions.get(instanceId);
+                if (currentSession) {
+                    currentSession.consecutiveFailures = (currentSession.consecutiveFailures || 0) + 1;
+
+                    // Se falhar 3 vezes consecutivas, tentar reconectar
+                    if (currentSession.consecutiveFailures >= 3) {
+                        console.log(`[${instanceId}] Keep-Alive: ${currentSession.consecutiveFailures} falhas consecutivas, reconectando...`);
+                        clearInterval(currentSession.keepAliveInterval);
+                        await handleConnectionLoss(instanceId, 'CONSECUTIVE_FAILURES');
+                    }
+                }
+            }
+        }, 20000); // 20 segundos (reduzido de 30s)
+
+        // Monitor de conexão adicional - verifica WebSocket a cada 45 segundos
+        session.connectionMonitorInterval = setInterval(async() => {
+            const currentSession = sessions.get(instanceId);
+            if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
+                return;
+            }
+
+            try {
+                // Verificar tempo desde último ping bem-sucedido
+                const timeSinceLastPing = Date.now() - (currentSession.lastPing || Date.now());
+                if (timeSinceLastPing > 60000) { // Mais de 1 minuto sem ping
+                    console.log(`[${instanceId}] Monitor: Sem ping há ${Math.round(timeSinceLastPing/1000)}s`);
+                }
+
+                // Verificar se o WebSocket está ativo através da página
+                const wsStatus = await Promise.race([
+                    currentSession.client.pupPage.evaluate(() => {
+                        try {
+                            return window.Store && window.Store.Socket && window.Store.Socket.state === 'CONNECTED';
+                        } catch (e) {
+                            return null;
+                        }
+                    }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+                ]);
+
+                if (wsStatus === false) {
+                    console.log(`[${instanceId}] Monitor: WebSocket não está conectado`);
+                }
+            } catch (err) {
+                console.error(`[${instanceId}] Monitor Error:`, err.message);
+            }
+        }, 45000); // 45 segundos
+
+        console.log(`[${instanceId}] Keep-Alive e Monitor de conexão iniciados`);
+    };
+
+    // ========================================
+    // FUNÇÃO DE TRATAMENTO DE PERDA DE CONEXÃO
+    // ========================================
+    const handleConnectionLoss = async(instId, reason) => {
+        const session = sessions.get(instId);
+        if (!session || session.isReconnecting) return;
+
+        session.isReconnecting = true;
+        console.log(`[${instId}] 🔌 Perda de conexão detectada: ${reason}`);
+
+        // Limpar intervalos
+        if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
+        if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+
+        // Tentar destruir cliente atual
+        try {
+            if (session.client) {
+                await Promise.race([
+                    session.client.destroy(),
+                    new Promise(resolve => setTimeout(resolve, 5000))
+                ]);
+            }
+        } catch (e) {
+            console.error(`[${instId}] Erro ao destruir cliente:`, e.message);
+        }
+
+        sessions.delete(instId);
+        await updateInstanceStatus(instId, 0);
+
+        // Reconectar após delay
+        const delay = 5000 + (Math.random() * 5000); // 5-10 segundos
+        console.log(`[${instId}] 🔄 Reconectando em ${Math.round(delay/1000)}s...`);
+
+        setTimeout(async() => {
+            if (!sessions.has(instId)) {
+                try {
+                    await startSession(instId);
+                } catch (err) {
+                    console.error(`[${instId}] Erro na reconexão:`, err.message);
+                }
+            }
+        }, delay);
+    };
+
+    // Evento de loading - importante para debug
+    client.on('loading_screen', (percent, message) => {
+        console.log(`[${instanceId}] Loading: ${percent}% - ${message}`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.status = `LOADING_${percent}%`;
+            session.lastActivity = Date.now();
+
+            // Se chegou a 100%, iniciar timeout de 60s para ready
+            if (percent === 100) {
+                session.loadingComplete = Date.now();
+                console.log(`[${instanceId}] Loading complete, waiting for ready event...`);
+
+                // Timeout de 60s após loading 100%
+                setTimeout(async() => {
+                    const currentSession = sessions.get(instanceId);
+                    if (currentSession && currentSession.status.startsWith('LOADING_')) {
+                        console.error(`[${instanceId}] TIMEOUT: Ready event not received after loading 100%`);
+                        console.log(`[${instanceId}] Sessão pode estar corrompida. Tente usar o botão Reset.`);
+                        currentSession.status = 'SYNC_TIMEOUT';
+                    }
+                }, 60000);
+            }
+        }
+    });
+
+    // Evento de mudança de estado - APRIMORADO
+    client.on('change_state', async(state) => {
+        console.log(`[${instanceId}] State changed to: ${state}`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.lastActivity = Date.now();
+            session.lastState = state;
+
+            if (state === 'CONNECTED') {
+                // Às vezes o ready não dispara mas o state muda para CONNECTED
+                const needsForceConnect = session.status.startsWith('LOADING_') ||
+                    session.status === 'SYNC_TIMEOUT' ||
+                    session.status === 'AUTHENTICATED' ||
+                    session.status === 'SYNC_FAILED';
+
+                if (needsForceConnect) {
+                    console.log(`[${instanceId}] State CONNECTED detected (was ${session.status}), forcing ready status`);
+                    session.status = 'CONNECTED';
+                    session.qr = null;
+                    session.reconnectAttempts = 0; // Reset contador
+
+                    // Tentar obter número do telefone
+                    try {
+                        const info = session.client.info;
+                        if (info && info.wid) {
+                            const phoneNumber = info.wid.user;
+                            updateInstanceStatus(instanceId, 1, phoneNumber);
+                        } else {
+                            updateInstanceStatus(instanceId, 1);
+                        }
+                    } catch (e) {
+                        updateInstanceStatus(instanceId, 1);
+                    }
+
+                    startKeepAlive();
+                }
+            } else if (state === 'CONFLICT') {
+                console.log(`[${instanceId}] ⚠️ CONFLICT detectado - tentando takeover...`);
+                // O takeover será tratado automaticamente pelo wwebjs se takeoverOnConflict estiver true
+                // Mas vamos forçar manualmente também
+                setTimeout(async() => {
+                    try {
+                        if (session.client && session.client.pupPage) {
+                            await session.client.pupPage.evaluate(() => window.Store.AppState.takeover());
+                            console.log(`[${instanceId}] Takeover executado`);
+                        }
+                    } catch (e) {
+                        console.error(`[${instanceId}] Erro no takeover manual:`, e.message);
+                    }
+                }, 2000);
+            } else if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+                console.log(`[${instanceId}] ⚠️ Sessão desemparelhada - necessário novo QR Code`);
+                session.status = 'QR_CODE';
+            } else if (state === 'OPENING') {
+                console.log(`[${instanceId}] 🔄 Abrindo conexão...`);
+            } else if (state === 'PAIRING') {
+                console.log(`[${instanceId}] 📱 Aguardando pareamento...`);
+            } else if (state === 'TIMEOUT') {
+                console.log(`[${instanceId}] ⏰ Timeout de conexão detectado`);
+            }
+        }
+    });
+
+    client.on('qr', (qr) => {
+        console.log(`QR Code received for ${instanceId}`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.qr = qr;
+            session.status = 'QR_CODE';
+            session.lastActivity = Date.now();
+        }
+    });
+
+    client.on('ready', async() => {
+        console.log(`Client ${instanceId} is ready!`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.status = 'CONNECTED';
+            session.qr = null;
+            session.lastActivity = Date.now();
+            session.reconnectAttempts = 0; // Reset contador de reconexões
+
+            // Iniciar Keep-Alive
+            startKeepAlive();
+        }
+
+        const info = client.info;
+        const phoneNumber = info.wid.user; // Number connected
+
+        await updateInstanceStatus(instanceId, 1, phoneNumber);
+    });
+
+    client.on('authenticated', () => {
+        console.log(`Client ${instanceId} authenticated`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.status = 'AUTHENTICATED';
+            session.authenticatedAt = Date.now();
+
+            // Verificação MUITO agressiva - primeira em 10s, depois a cada 15s
+            const checkAuthenticatedState = async(attempt = 1) => {
+                const currentSession = sessions.get(instanceId);
+                if (!currentSession || currentSession.status !== 'AUTHENTICATED') {
+                    return; // Já mudou de estado, parar verificação
+                }
+
+                console.log(`[${instanceId}] ⏳ Verificação ${attempt}/10 - Status ainda AUTHENTICATED...`);
+
+                try {
+                    if (currentSession.client && currentSession.client.pupPage && !currentSession.client.pupPage.isClosed()) {
+                        // Primeiro, tentar forçar a sincronização manualmente
+                        if (attempt === 2 || attempt === 5) {
+                            console.log(`[${instanceId}] 🔄 Tentando forçar sincronização...`);
+                            try {
+                                await currentSession.client.pupPage.evaluate(() => {
+                                    // Forçar verificação de hasSynced
+                                    if (window.AuthStore && window.AuthStore.AppState) {
+                                        const hasSynced = window.AuthStore.AppState.hasSynced;
+                                        console.log('hasSynced:', hasSynced);
+                                        if (hasSynced && window.onAppStateHasSyncedEvent) {
+                                            window.onAppStateHasSyncedEvent();
+                                        }
+                                    }
+                                });
+                            } catch (forceErr) {
+                                console.log(`[${instanceId}] Erro ao forçar sync:`, forceErr.message);
+                            }
+                        }
+
+                        const state = await Promise.race([
+                            currentSession.client.getState(),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+                        ]);
+
+                        console.log(`[${instanceId}] Current state: ${state}`);
+
+                        if (state === 'CONNECTED') {
+                            console.log(`[${instanceId}] ✅ Forcing CONNECTED status (ready event missed)`);
+                            currentSession.status = 'CONNECTED';
+                            currentSession.qr = null;
+
+                            // Tentar injetar Store se necessário
+                            try {
+                                const hasStore = await currentSession.client.pupPage.evaluate(() => {
+                                    return typeof window.Store !== 'undefined';
+                                });
+                                if (!hasStore) {
+                                    console.log(`[${instanceId}] 🔧 Store não encontrado, aguardando...`);
+                                }
+                            } catch (e) {}
+
+                            try {
+                                // Tentar obter info do cliente
+                                const info = currentSession.client.info;
+                                if (info && info.wid) {
+                                    const phoneNumber = info.wid.user;
+                                    await updateInstanceStatus(instanceId, 1, phoneNumber);
+                                } else {
+                                    await updateInstanceStatus(instanceId, 1);
+                                }
+                            } catch (infoErr) {
+                                console.error(`[${instanceId}] Error getting client info:`, infoErr.message);
+                                await updateInstanceStatus(instanceId, 1);
+                            }
+
+                            startKeepAlive();
+                            return;
+                        } else if (state === 'OPENING' || state === 'PAIRING') {
+                            console.log(`[${instanceId}] Still syncing (${state}), will check again...`);
+                        } else {
+                            console.log(`[${instanceId}] State: ${state}`);
+                        }
+                    }
+                } catch (err) {
+                    console.error(`[${instanceId}] Error checking state:`, err.message);
+                }
+
+                // Tentar novamente até 10 vezes (15s * 10 = 2.5 minutos máximo)
+                if (attempt < 10) {
+                    setTimeout(() => checkAuthenticatedState(attempt + 1), 15000);
+                } else {
+                    console.log(`[${instanceId}] ⚠️ Máximo de tentativas. Status: SYNC_TIMEOUT`);
+                    const sess = sessions.get(instanceId);
+                    if (sess && sess.status === 'AUTHENTICATED') {
+                        sess.status = 'SYNC_TIMEOUT';
+                    }
+                }
+            };
+
+            // Primeira verificação após 10 segundos (mais rápido!)
+            setTimeout(() => checkAuthenticatedState(1), 10000);
+        }
+    });
+
+    client.on('auth_failure', (msg) => {
+        console.error(`Auth failure for ${instanceId}:`, msg);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.status = 'AUTH_FAILURE';
+            session.authFailureReason = msg;
+        }
+    });
+
+    // Handler para quando a sessão remota é salva (importante para persistência)
+    client.on('remote_session_saved', () => {
+        console.log(`[${instanceId}] 💾 Sessão remota salva`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.lastSessionSave = Date.now();
+        }
+    });
+
+    // Handler para chamadas recebidas (mantém a conexão ativa)
+    client.on('call', async(call) => {
+        console.log(`[${instanceId}] 📞 Chamada recebida de ${call.from}`);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.lastActivity = Date.now();
+        }
+    });
+
+    client.on('disconnected', async(reason) => {
+        console.log(`[${instanceId}] ❌ DISCONNECTED - Reason: ${reason}`);
+        await updateInstanceStatus(instanceId, 0);
+
+        // Clean up session
+        const session = sessions.get(instanceId);
+        let reconnectAttempts = 0;
+
+        if (session) {
+            // Parar Keep-Alive e Monitor
+            if (session.keepAliveInterval) {
+                clearInterval(session.keepAliveInterval);
+            }
+            if (session.connectionMonitorInterval) {
+                clearInterval(session.connectionMonitorInterval);
+            }
+
+            reconnectAttempts = session.reconnectAttempts || 0;
+            session.status = 'DISCONNECTED';
+            session.client = null;
+            session.disconnectReason = reason;
+            session.disconnectTime = Date.now();
+
+            // Destruir cliente com timeout
+            try {
+                await Promise.race([
+                    client.destroy(),
+                    new Promise(resolve => setTimeout(resolve, 10000))
+                ]);
+            } catch (e) {
+                console.error(`[${instanceId}] Error destroying client:`, e.message);
+            }
+        }
+        sessions.delete(instanceId);
+
+        // ========================================
+        // RECONEXÃO AUTOMÁTICA INTELIGENTE APRIMORADA
+        // ========================================
+        const noReconnectReasons = ['LOGOUT', 'TOS_BLOCK', 'SMB_TOS_BLOCK'];
+        const immediateReconnectReasons = ['CONFLICT', 'UNPAIRED', 'NAVIGATION'];
+        const maxReconnectAttempts = 10; // Aumentado de 5 para 10
+
+        if (noReconnectReasons.includes(reason)) {
+            console.log(`[${instanceId}] ⛔ Reconexão desabilitada para: ${reason}`);
+            return;
+        }
+
+        if (reconnectAttempts >= maxReconnectAttempts) {
+            console.log(`[${instanceId}] ⛔ Máximo de tentativas de reconexão atingido (${maxReconnectAttempts})`);
+            // Resetar contador após 30 minutos para permitir novas tentativas
+            setTimeout(() => {
+                console.log(`[${instanceId}] 🔄 Resetando contador de reconexões após 30 minutos`);
+                // Tentar reconectar novamente
+                if (!sessions.has(instanceId)) {
+                    startSession(instanceId);
+                }
+            }, 1800000); // 30 minutos
+            return;
+        }
+
+        // Calcular delay com backoff exponencial
+        let delay;
+        if (immediateReconnectReasons.includes(reason)) {
+            // Reconexão rápida para conflitos e navegação
+            delay = 3000 + (reconnectAttempts * 2000); // 3s, 5s, 7s...
+        } else {
+            // Backoff exponencial para outros casos (5s, 10s, 20s, 40s... max 5 min)
+            const baseDelay = 5000;
+            delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts), 300000);
+        }
+
+        // Adicionar jitter para evitar thundering herd
+        delay += Math.random() * 3000;
+
+        console.log(`[${instanceId}] 🔄 Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1}/${maxReconnectAttempts})`);
+
+        setTimeout(async() => {
+            try {
+                if (!pool) return;
+
+                // Verificar se a instância ainda existe no banco
+                const [rows] = await pool.execute('SELECT id FROM instances WHERE id = ?', [instanceId]);
+
+                if (rows.length > 0 && !sessions.has(instanceId)) {
+                    console.log(`[${instanceId}] 🔄 Iniciando reconexão automática...`);
+
+                    // Iniciar sessão e incrementar contador
+                    const newSession = await startSession(instanceId);
+                    if (newSession) {
+                        newSession.reconnectAttempts = reconnectAttempts + 1;
+                    }
+                }
+            } catch (err) {
+                console.error(`[${instanceId}] Erro na reconexão automática:`, err.message);
+            }
+        }, delay);
+    });
+
+    client.on('message', async msg => {
+        // Atualizar última atividade
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.lastActivity = Date.now();
+        }
+
+        console.log(`[${instanceId}] Message from ${msg.from}: ${msg.body}`);
+        handleIncomingMessage(instanceId, msg);
+    });
+
+    try {
+        console.log(`[${instanceId}] Calling client.initialize()...`);
+
+        // Timeout de 2 minutos para inicialização
+        const initPromise = client.initialize();
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Timeout: Inicialização demorou mais de 2 minutos')), 120000);
+        });
+
+        await Promise.race([initPromise, timeoutPromise]);
+        console.log(`[${instanceId}] client.initialize() completed`);
+    } catch (err) {
+        console.error(`Failed to initialize client ${instanceId}:`, err);
+        const session = sessions.get(instanceId);
+        if (session) {
+            session.status = 'INIT_ERROR';
+        }
+        // Tentar destruir o cliente se existir
+        try {
+            await client.destroy();
+        } catch (destroyErr) {
+            console.error(`Error destroying failed client ${instanceId}:`, destroyErr);
+        }
+        sessions.delete(instanceId);
+    }
+
+    return sessions.get(instanceId);
+}
+
+async function stopSession(instanceId) {
+    const session = sessions.get(instanceId);
+    if (!session || !session.client) {
+        return false;
+    }
+
+    try {
+        await session.client.destroy();
+        sessions.delete(instanceId);
+        await updateInstanceStatus(instanceId, 0);
+        console.log(`Session ${instanceId} stopped`);
+        return true;
+    } catch (err) {
+        console.error(`Error stopping session ${instanceId}:`, err);
+        return false;
+    }
+}
+
+async function handleIncomingMessage(instanceId, msg) {
+    if (!pool) return;
+
+    const phone = msg.from.replace('@c.us', '');
+    const messageBody = msg.body.trim();
+
+    console.log(`[Incoming] From: ${phone}, Message: "${messageBody}"`);
+
+    try {
+        // Verificar se é uma resposta de confirmação (1 ou 2)
+        if (messageBody === '1' || messageBody === '2') {
+            console.log(`[Incoming] Detected confirmation response: ${messageBody}`);
+
+            // Buscar agendamento pendente para este telefone
+            const [agendamentos] = await pool.execute(
+                `SELECT id, error_message FROM agendamentos 
+                 WHERE instance_id = ? AND to_number = ? AND status = 'pending' 
+                 ORDER BY created_at DESC LIMIT 1`, [instanceId, phone]
+            );
+
+            if (agendamentos.length > 0) {
+                const agendamento = agendamentos[0];
+                let extraData = {};
+
+                try {
+                    extraData = JSON.parse(agendamento.error_message || '{}');
+                } catch (e) {
+                    console.error('[Incoming] Error parsing extra data:', e);
+                }
+
+                const session = sessions.get(instanceId);
+                const chatId = msg.from;
+
+                // Processar resposta
+                if (messageBody === '1') {
+                    // Confirmado
+                    await pool.execute(
+                        `UPDATE agendamentos SET status = 'sent' WHERE id = ?`, [agendamento.id]
+                    );
+
+                    // Salvar na tabela confirmacoes_processadas
+                    await pool.execute(
+                        `INSERT INTO confirmacoes_processadas (telefone, agendamento_id, resposta, instance_id) 
+                         VALUES (?, ?, '1', ?)`, [phone, extraData.id_consulta || agendamento.id, instanceId]
+                    );
+
+                    // Enviar mensagem de confirmação
+                    if (session && session.client && extraData.msg_confirma) {
+                        await session.client.sendMessage(chatId, extraData.msg_confirma);
+                        console.log(`[Incoming] Sent confirmation message to ${phone}`);
+                    }
+
+                    console.log(`[Incoming] Agendamento ${agendamento.id} CONFIRMADO`);
+
+                } else if (messageBody === '2') {
+                    // Cancelado/Reagendar
+                    await pool.execute(
+                        `UPDATE agendamentos SET status = 'cancelled' WHERE id = ?`, [agendamento.id]
+                    );
+
+                    // Salvar na tabela confirmacoes_processadas
+                    await pool.execute(
+                        `INSERT INTO confirmacoes_processadas (telefone, agendamento_id, resposta, instance_id) 
+                         VALUES (?, ?, '2', ?)`, [phone, extraData.id_consulta || agendamento.id, instanceId]
+                    );
+
+                    // Enviar mensagem de reagendamento
+                    if (session && session.client && extraData.msg_reagendar) {
+                        await session.client.sendMessage(chatId, extraData.msg_reagendar);
+                        console.log(`[Incoming] Sent cancellation message to ${phone}`);
+                    }
+
+                    console.log(`[Incoming] Agendamento ${agendamento.id} CANCELADO`);
+                }
+
+                // Enviar para o webhook do sistema PHP (retorno.php)
+                if (extraData.url_recebe) {
+                    const payload = {
+                        telefone: phone,
+                        status: messageBody,
+                        id: extraData.id_consulta,
+                        instance_id: instanceId
+                    };
+
+                    console.log(`[Incoming] Sending to webhook: ${extraData.url_recebe}`);
+
+                    try {
+                        const webhookResponse = await axios.post(extraData.url_recebe, payload);
+                        console.log(`[Incoming] Webhook response:`, webhookResponse.data);
+
+                        // Salvar log do webhook
+                        await pool.execute(
+                            `INSERT INTO webhook_logs (instance_id, url, payload, response, status_code) 
+                             VALUES (?, ?, ?, ?, ?)`, [instanceId, extraData.url_recebe, JSON.stringify(payload), JSON.stringify(webhookResponse.data), webhookResponse.status]
+                        );
+                    } catch (webhookErr) {
+                        console.error(`[Incoming] Webhook error:`, webhookErr.message);
+
+                        // Salvar log do erro
+                        await pool.execute(
+                            `INSERT INTO webhook_logs (instance_id, url, payload, response, status_code) 
+                             VALUES (?, ?, ?, ?, ?)`, [instanceId, extraData.url_recebe, JSON.stringify(payload), webhookErr.message, 0]
+                        );
+                    }
+                }
+
+                return; // Já processou a confirmação, não precisa continuar
+            } else {
+                console.log(`[Incoming] No pending agendamento found for ${phone}`);
+
+                // Enviar mensagem de erro se configurada
+                const session = sessions.get(instanceId);
+                if (session && session.client) {
+                    // Buscar último agendamento para pegar msg_erro
+                    const [lastAgendamento] = await pool.execute(
+                        `SELECT error_message FROM agendamentos 
+                         WHERE instance_id = ? AND to_number = ? 
+                         ORDER BY created_at DESC LIMIT 1`, [instanceId, phone]
+                    );
+
+                    if (lastAgendamento.length > 0) {
+                        try {
+                            const extraData = JSON.parse(lastAgendamento[0].error_message || '{}');
+                            if (extraData.msg_erro) {
+                                await session.client.sendMessage(msg.from, extraData.msg_erro);
+                            }
+                        } catch (e) {}
+                    }
+                }
+            }
+        }
+
+        // Para outras mensagens (não são 1 ou 2), enviar para o webhook genérico
+        const [rows] = await pool.execute(
+            'SELECT webhook FROM instances WHERE id = ?', [instanceId]
+        );
+
+        if (rows.length > 0 && rows[0].webhook) {
+            const webhookUrl = rows[0].webhook;
+
+            const payload = {
+                telefone: phone,
+                status: messageBody,
+                message: messageBody,
+                instance_id: instanceId,
+                message_id: msg.id._serialized
+            };
+
+            console.log(`[Incoming] Sending to generic webhook: ${webhookUrl}`);
+
+            await axios.post(webhookUrl, payload)
+                .then(res => console.log(`[Incoming] Webhook response:`, res.data))
+                .catch(err => console.error(`[Incoming] Webhook error:`, err.message));
+        }
+    } catch (error) {
+        console.error(`[Incoming] Error processing message:`, error);
+    }
+}
+
+// --- API Endpoints ---
+
+// Start a session
+app.post('/api/session/start', async(req, res) => {
+    const { instanceId } = req.body;
+    if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
+
+    try {
+        await startSession(instanceId);
+        res.json({ success: true, message: 'Session starting' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Stop a session
+app.post('/api/session/stop', async(req, res) => {
+    const { instanceId } = req.body;
+    if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
+
+    const result = await stopSession(instanceId);
+    res.json({ success: result, message: result ? 'Session stopped' : 'Session not found or already stopped' });
+});
+
+// Reset/Limpar sessão corrompida
+app.post('/api/session/reset', async(req, res) => {
+    const { instanceId } = req.body;
+    if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
+
+    console.log(`[RESET] Iniciando reset da sessão ${instanceId}`);
+
+    try {
+        // 1. Parar sessão se existir
+        const session = sessions.get(instanceId);
+        if (session && session.client) {
+            try {
+                await session.client.destroy();
+            } catch (e) {
+                console.log(`[RESET] Erro ao destruir cliente: ${e.message}`);
+            }
+        }
+        sessions.delete(instanceId);
+
+        // 2. Remover pasta de sessão
+        const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${instanceId}`);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log(`[RESET] Pasta de sessão removida: ${sessionPath}`);
+        }
+
+        // 3. Atualizar status no banco
+        await updateInstanceStatus(instanceId, 0);
+
+        res.json({
+            success: true,
+            message: 'Sessão resetada com sucesso. Inicie novamente para gerar novo QR Code.'
+        });
+    } catch (err) {
+        console.error(`[RESET] Erro ao resetar sessão ${instanceId}:`, err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Reset completo - limpa sessão E cache
+app.post('/api/session/full-reset', async(req, res) => {
+    const { instanceId } = req.body;
+    if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
+
+    console.log(`[FULL-RESET] Iniciando reset completo da sessão ${instanceId}`);
+
+    try {
+        // 1. Parar sessão se existir
+        const session = sessions.get(instanceId);
+        if (session && session.client) {
+            try {
+                await session.client.destroy();
+            } catch (e) {
+                console.log(`[FULL-RESET] Erro ao destruir cliente: ${e.message}`);
+            }
+        }
+        sessions.delete(instanceId);
+
+        // 2. Remover pasta de sessão
+        const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${instanceId}`);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log(`[FULL-RESET] Pasta de sessão removida: ${sessionPath}`);
+        }
+
+        // 3. Limpar cache do WhatsApp Web
+        const cachePath = path.join(__dirname, '.wwebjs_cache');
+        if (fs.existsSync(cachePath)) {
+            fs.rmSync(cachePath, { recursive: true, force: true });
+            console.log(`[FULL-RESET] Cache do WhatsApp Web removido: ${cachePath}`);
+        }
+
+        // 4. Atualizar status no banco
+        await updateInstanceStatus(instanceId, 0);
+
+        res.json({
+            success: true,
+            message: 'Reset completo realizado. Cache e sessão removidos. Inicie novamente.'
+        });
+    } catch (err) {
+        console.error(`[FULL-RESET] Erro ao resetar sessão ${instanceId}:`, err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get Session Status
+app.get('/api/session/status/:id', (req, res) => {
+    const instanceId = req.params.id;
+    const session = sessions.get(instanceId);
+
+    if (!session) {
+        return res.json({ status: 'DISCONNECTED' });
+    }
+
+    res.json({
+        status: session.status,
+        hasQr: !!session.qr
+    });
+});
+
+// API para listar todas as instâncias do banco de dados com status em tempo real
+app.get('/api/instances', async(req, res) => {
+    if (!pool) {
+        return res.status(500).json({ error: 'Database not connected' });
+    }
+
+    try {
+        const [dbInstances] = await pool.execute(
+            'SELECT id, name, sistema_php_url, webhook, phone_number, status as db_status, created_at, last_connection FROM instances ORDER BY created_at DESC'
+        );
+
+        const instanceList = dbInstances.map(inst => {
+            const session = sessions.get(inst.id);
+            return {
+                id: inst.id,
+                name: inst.name || 'Sem nome',
+                sistema_php_url: inst.sistema_php_url,
+                webhook: inst.webhook,
+                phone_number: inst.phone_number,
+                status: session ? session.status : 'DISCONNECTED',
+                db_status: inst.db_status,
+                hasActiveSession: !!session,
+                created_at: inst.created_at,
+                last_connection: inst.last_connection
+            };
+        });
+
+        res.json({
+            success: true,
+            count: instanceList.length,
+            instances: instanceList
+        });
+    } catch (err) {
+        console.error('[API instances] Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// System Health Check - APRIMORADO
+app.get('/api/health', (req, res) => {
+    const memoryUsage = process.memoryUsage();
+    const now = Date.now();
+
+    const activeSessions = Array.from(sessions.entries()).map(([id, session]) => ({
+        id,
+        status: session.status,
+        hasClient: !!session.client,
+        hasBrowser: session.client && session.client.pupBrowser ? session.client.pupBrowser.isConnected() : false,
+        hasPage: session.client && session.client.pupPage ? !session.client.pupPage.isClosed() : false,
+        lastActivity: session.lastActivity ? Math.round((now - session.lastActivity) / 1000) + 's ago' : 'N/A',
+        lastPing: session.lastPing ? Math.round((now - session.lastPing) / 1000) + 's ago' : 'N/A',
+        consecutiveFailures: session.consecutiveFailures || 0,
+        reconnectAttempts: session.reconnectAttempts || 0,
+        keepAliveActive: !!session.keepAliveInterval,
+        monitorActive: !!session.connectionMonitorInterval
+    }));
+
+    res.json({
+        status: 'online',
+        uptime: Math.round(process.uptime()) + 's',
+        uptimeFormatted: formatUptime(process.uptime()),
+        timestamp: new Date().toISOString(),
+        sessions: {
+            total: sessions.size,
+            connected: activeSessions.filter(s => s.status === 'CONNECTED').length,
+            initializing: activeSessions.filter(s => s.status === 'INITIALIZING' || s.status.startsWith('LOADING_')).length,
+            disconnected: activeSessions.filter(s => s.status === 'DISCONNECTED').length,
+            qrCode: activeSessions.filter(s => s.status === 'QR_CODE').length,
+            list: activeSessions
+        },
+        memory: {
+            rss: Math.round(memoryUsage.rss / 1024 / 1024) + ' MB',
+            heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024) + ' MB',
+            heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + ' MB',
+            external: Math.round(memoryUsage.external / 1024 / 1024) + ' MB'
+        },
+        healthCheck: {
+            enabled: !!healthCheckInterval,
+            interval: '45s',
+            deepCheckInterval: '5min'
+        }
+    });
+});
+
+// Função auxiliar para formatar uptime
+function formatUptime(seconds) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+
+    const parts = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    parts.push(`${secs}s`);
+
+    return parts.join(' ');
+}
+
+// Forçar reconexão de uma instância
+app.post('/api/session/reconnect', async(req, res) => {
+    const { instanceId } = req.body;
+    if (!instanceId) return res.status(400).json({ error: 'Missing instanceId' });
+
+    console.log(`[Reconnect] Forçando reconexão de ${instanceId}`);
+
+    try {
+        // Parar sessão atual se existir
+        const session = sessions.get(instanceId);
+        if (session && session.client) {
+            try {
+                await session.client.destroy();
+            } catch (e) {
+                console.log(`[Reconnect] Erro ao destruir cliente: ${e.message}`);
+            }
+        }
+        sessions.delete(instanceId);
+
+        // Aguardar um pouco antes de reconectar
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Iniciar nova sessão
+        await startSession(instanceId);
+
+        res.json({
+            success: true,
+            message: 'Reconexão iniciada. Aguarde alguns segundos.'
+        });
+    } catch (err) {
+        console.error(`[Reconnect] Erro:`, err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Forçar health check manual
+app.post('/api/health/check', async(req, res) => {
+    console.log('[HealthCheck] Verificação manual solicitada');
+
+    try {
+        await healthCheck();
+        await checkMissingInstances();
+
+        res.json({
+            success: true,
+            message: 'Health check executado',
+            sessions: sessions.size
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get QR Code Image
+app.get('/api/session/qr/:id', async(req, res) => {
+    const instanceId = req.params.id;
+    const session = sessions.get(instanceId);
+
+    if (!session || !session.qr) {
+        return res.status(404).send('QR Code not available (Session not started or already connected)');
+    }
+
+    try {
+        const qrImage = await qrcode.toBuffer(session.qr);
+        res.type('png').send(qrImage);
+    } catch (err) {
+        res.status(500).send('Error generating QR image');
+    }
+});
+
+// Send Message API (Updated for Multi-tenant)
+app.post('/api/agendar-text', async(req, res) => {
+    // Debug: Log completo do que está chegando
+    console.log('[API] === REQUEST DEBUG ===');
+    console.log('[API] Headers:', JSON.stringify(req.headers));
+    console.log('[API] Body:', JSON.stringify(req.body));
+    console.log('[API] ======================');
+
+    const { instance, to, message, token } = req.body;
+
+    console.log(`[API] Request received for instance: ${instance}, to: ${to}`);
+
+    if (!instance || !to || !message) {
+        console.log('[API] Missing parameters');
+        return res.status(400).json({ error: 'Missing parameters' });
+    }
+
+    // Validate Token (Optional but recommended)
+    if (pool) {
+        try {
+            const [rows] = await pool.execute('SELECT api_token FROM instances WHERE id = ?', [instance]);
+
+            if (rows.length === 0) {
+                console.log(`[API] Instance ${instance} not found in DB`);
+                return res.status(404).json({ error: 'Instance not found' });
+            }
+
+            if (token && rows[0].api_token !== token) {
+                console.warn(`[API] Invalid token for instance ${instance}`);
+                return res.status(403).json({ error: 'Invalid token' });
+            }
+        } catch (err) {
+            console.error('[API] Database error validating token:', err);
+            // Continue execution? Maybe return 500
+        }
+    }
+
+    const session = sessions.get(instance);
+    if (!session) {
+        console.log(`[API] Session not found in memory for ${instance}`);
+        return res.status(503).json({ error: 'Instance not active/loaded' });
+    }
+
+    if (session.status !== 'CONNECTED' || !session.client) {
+        console.log(`[API] Session ${instance} not connected. Status: ${session.status}`);
+        return res.status(503).json({ error: 'Instance not connected' });
+    }
+
+    try {
+        const chatId = to.includes('@') ? to : `${to}@c.us`;
+        console.log(`[API] Sending message to ${chatId}...`);
+
+        const sentMsg = await session.client.sendMessage(chatId, message);
+
+        console.log(`[API] Message sent successfully. ID: ${sentMsg.id._serialized}`);
+
+        res.json({
+            message: {
+                hash: sentMsg.id._serialized,
+                id: sentMsg.id._serialized,
+                sent: true
+            }
+        });
+    } catch (error) {
+        console.error(`[API] Error sending message from ${instance}:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Alias para /api/agendar-text (compatibilidade com texto.php)
+app.post('/api/send-text', async(req, res) => {
+    const { instance, to, message, token } = req.body;
+
+    console.log(`[API send-text] Request received for instance: ${instance}, to: ${to}`);
+
+    if (!instance || !to || !message) {
+        console.log('[API send-text] Missing parameters');
+        return res.status(400).json({ error: 'Missing parameters' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session) {
+        console.log(`[API send-text] Session not found for ${instance}`);
+        return res.status(503).json({ error: 'Instance not active/loaded' });
+    }
+
+    if (session.status !== 'CONNECTED' || !session.client) {
+        console.log(`[API send-text] Session ${instance} not connected. Status: ${session.status}`);
+        return res.status(503).json({ error: 'Instance not connected' });
+    }
+
+    try {
+        const chatId = to.includes('@') ? to : `${to}@c.us`;
+        const phoneNumber = to.replace(/\D/g, ''); // Limpar telefone
+
+        const sentMsg = await session.client.sendMessage(chatId, message);
+        console.log(`[API send-text] Message sent successfully. ID: ${sentMsg.id._serialized}`);
+
+        // Salvar na tabela messages (existente)
+        if (pool) {
+            try {
+                await pool.execute(
+                    `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+                     VALUES (?, ?, ?, 'text', 'sent', NOW())`, [instance, phoneNumber, message]
+                );
+            } catch (dbErr) {
+                console.error('[API send-text] Error saving message to DB:', dbErr);
+            }
+        }
+
+        res.json({
+            message: {
+                hash: sentMsg.id._serialized,
+                id: sentMsg.id._serialized,
+                sent: true
+            }
+        });
+    } catch (error) {
+        console.error(`[API send-text] Error sending message:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ========================================
+// ENVIAR MÍDIA/ARQUIVO PARA CONTATO
+// ========================================
+app.post('/api/send-media', upload.single('file'), async(req, res) => {
+    const { instance, to, caption, token, mediaUrl, mediaBase64, filename, mimetype } = req.body;
+
+    console.log(`[API send-media] Request for instance: ${instance}, to: ${to}`);
+
+    if (!instance || !to) {
+        return res.status(400).json({ error: 'instance e to são obrigatórios' });
+    }
+
+    // Validar instância
+    const session = sessions.get(instance);
+    if (!session) {
+        console.log(`[API send-media] Session not found for ${instance}`);
+        return res.status(503).json({ error: 'Instance not active/loaded' });
+    }
+
+    if (session.status !== 'CONNECTED' || !session.client) {
+        console.log(`[API send-media] Session ${instance} not connected. Status: ${session.status}`);
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        let media;
+
+        // Prioridade: arquivo upload > URL > Base64
+        if (req.file) {
+            // Upload de arquivo
+            media = MessageMedia.fromFilePath(req.file.path);
+            console.log(`[API send-media] File uploaded: ${req.file.originalname}`);
+        } else if (mediaUrl) {
+            // URL remota
+            media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
+            console.log(`[API send-media] Media from URL: ${mediaUrl}`);
+        } else if (mediaBase64) {
+            // Base64 direto
+            if (!mimetype) {
+                return res.status(400).json({ error: 'mimetype é obrigatório quando usar mediaBase64' });
+            }
+            media = new MessageMedia(mimetype, mediaBase64, filename || 'arquivo');
+            console.log(`[API send-media] Media from Base64`);
+        } else {
+            return res.status(400).json({ error: 'Nenhuma mídia fornecida (file, mediaUrl ou mediaBase64)' });
+        }
+
+        const chatId = to.includes('@') ? to : `${to}@c.us`;
+        const sentMsg = await session.client.sendMessage(chatId, media, {
+            caption: caption || ''
+        });
+
+        console.log(`[API send-media] Media sent. ID: ${sentMsg.id._serialized}`);
+
+        // Limpar arquivo temporário
+        if (req.file) {
+            fs.unlink(req.file.path, (err) => {
+                if (err) console.error('[API send-media] Error deleting temp file:', err);
+            });
+        }
+
+        // Salvar no banco
+        if (pool) {
+            try {
+                const phoneNumber = to.replace(/\D/g, '');
+                await pool.execute(
+                    `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+                     VALUES (?, ?, ?, 'media', 'sent', NOW())`, [instance, phoneNumber, caption || '[MEDIA]']
+                );
+            } catch (dbErr) {
+                console.error('[API send-media] Error saving to DB:', dbErr);
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Mídia enviada com sucesso',
+            messageId: sentMsg.id._serialized
+        });
+    } catch (error) {
+        console.error(`[API send-media] Error:`, error);
+        // Limpar arquivo temporário em caso de erro
+        if (req.file) {
+            fs.unlink(req.file.path, () => {});
+        }
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Rota para agendamento programado com confirmação (compatibilidade com confirmacao.php)
+app.post('/api/agendar-program', async(req, res) => {
+    const { instance, to, message, msg_erro, msg_confirma, msg_reagendar, id_consulta, url_recebe, data, aviso } = req.body;
+
+    console.log(`[API agendar-program] Request received for instance: ${instance}, to: ${to}, id_consulta: ${id_consulta}`);
+
+    if (!instance || !to || !message) {
+        console.log('[API agendar-program] Missing parameters');
+        return res.status(400).json({ error: 'Missing parameters' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session) {
+        console.log(`[API agendar-program] Session not found for ${instance}`);
+        return res.status(503).json({ error: 'Instance not active/loaded' });
+    }
+
+    if (session.status !== 'CONNECTED' || !session.client) {
+        console.log(`[API agendar-program] Session ${instance} not connected. Status: ${session.status}`);
+        return res.status(503).json({ error: 'Instance not connected' });
+    }
+
+    try {
+        const chatId = to.includes('@') ? to : `${to}@c.us`;
+        const phoneNumber = to.replace(/\D/g, ''); // Limpar telefone
+
+        // Enviar a mensagem principal
+        const sentMsg = await session.client.sendMessage(chatId, message);
+        console.log(`[API agendar-program] Message sent. ID: ${sentMsg.id._serialized}`);
+
+        // Salvar na tabela messages (existente)
+        if (pool) {
+            try {
+                await pool.execute(
+                    `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+                     VALUES (?, ?, ?, 'text', 'sent', NOW())`, [instance, phoneNumber, message]
+                );
+                console.log(`[API agendar-program] Message saved to DB`);
+            } catch (dbErr) {
+                console.error('[API agendar-program] Error saving message:', dbErr);
+            }
+        }
+
+        // Salvar agendamento para confirmação na tabela agendamentos (existente)
+        if (pool && id_consulta) {
+            try {
+                // Usar a tabela agendamentos existente para guardar info de confirmação
+                // Vamos usar o campo error_message para guardar os dados extras (JSON)
+                const extraData = JSON.stringify({
+                    id_consulta,
+                    url_recebe: url_recebe || '',
+                    msg_erro: msg_erro || '',
+                    msg_confirma: msg_confirma || '',
+                    msg_reagendar: msg_reagendar || '',
+                    message_id: sentMsg.id._serialized
+                });
+
+                await pool.execute(
+                    `INSERT INTO agendamentos (instance_id, to_number, message, scheduled_at, status, error_message) 
+                     VALUES (?, ?, ?, NOW(), 'pending', ?)`, [instance, phoneNumber, message, extraData]
+                );
+                console.log(`[API agendar-program] Agendamento saved for id_consulta: ${id_consulta}`);
+            } catch (dbErr) {
+                console.error('[API agendar-program] Error saving agendamento:', dbErr);
+            }
+        }
+
+        res.json({
+            erro: false,
+            message: 'Mensagem enviada com sucesso',
+            id: sentMsg.id._serialized,
+            hash: sentMsg.id._serialized
+        });
+    } catch (error) {
+        console.error(`[API agendar-program] Error sending message:`, error);
+        res.status(500).json({ erro: true, error: error.message });
+    }
+});
+
+// ========================================
+// API DE GRUPOS - Para integração com PHP
+// ========================================
+
+// Criar tabela de grupos locais no banco
+async function initGroupsTable() {
+    if (!pool) return;
+    try {
+        await pool.execute(`
+            CREATE TABLE IF NOT EXISTS whatsapp_groups (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                instance_id VARCHAR(255) NOT NULL,
+                group_id VARCHAR(255) NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                created_by VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_group (instance_id, group_id)
+            )
+        `);
+
+        await pool.execute(`
+            CREATE TABLE IF NOT EXISTS whatsapp_group_members (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                group_id INT NOT NULL,
+                phone_number VARCHAR(50) NOT NULL,
+                name VARCHAR(255),
+                is_admin BOOLEAN DEFAULT FALSE,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (group_id) REFERENCES whatsapp_groups(id) ON DELETE CASCADE,
+                UNIQUE KEY unique_member (group_id, phone_number)
+            )
+        `);
+
+        console.log('✅ Tabelas de grupos criadas/verificadas');
+    } catch (err) {
+        console.error('Erro ao criar tabelas de grupos:', err);
+    }
+}
+
+// 1. CRIAR GRUPO NO WHATSAPP
+app.post('/api/group/create', async(req, res) => {
+    const { instance, name, participants, description } = req.body;
+
+    console.log(`[API Group] Creating group "${name}" for instance ${instance}`);
+
+    if (!instance || !name) {
+        return res.status(400).json({ error: 'instance e name são obrigatórios' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        // Formatar participantes (adicionar @c.us se necessário)
+        let participantList = [];
+        if (participants && Array.isArray(participants)) {
+            participantList = participants.map(p => {
+                const phone = p.replace(/\D/g, '');
+                return phone.includes('@') ? phone : `${phone}@c.us`;
+            });
+        }
+
+        // Criar grupo no WhatsApp
+        const result = await session.client.createGroup(name, participantList);
+
+        console.log(`[API Group] Group created:`, result);
+
+        // Salvar no banco local
+        if (pool && result.gid) {
+            const groupId = result.gid._serialized || result.gid;
+
+            await pool.execute(
+                `INSERT INTO whatsapp_groups (instance_id, group_id, name, description, created_by) 
+                 VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE name = ?, description = ?`, [instance, groupId, name, description || '', session.client.info.wid.user, name, description || '']
+            );
+
+            // Salvar membros
+            const [groupRow] = await pool.execute(
+                'SELECT id FROM whatsapp_groups WHERE instance_id = ? AND group_id = ?', [instance, groupId]
+            );
+
+            if (groupRow.length > 0 && result.participants) {
+                const localGroupId = groupRow[0].id;
+                for (const [participantId, data] of Object.entries(result.participants)) {
+                    const phone = participantId.replace('@c.us', '');
+                    await pool.execute(
+                        `INSERT INTO whatsapp_group_members (group_id, phone_number, is_admin) 
+                         VALUES (?, ?, FALSE)
+                         ON DUPLICATE KEY UPDATE phone_number = ?`, [localGroupId, phone, phone]
+                    );
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Grupo criado com sucesso',
+            group: {
+                id: result.gid && result.gid._serialized ? result.gid._serialized : result.gid,
+                name: result.title || name,
+                participants: result.participants
+            }
+        });
+    } catch (error) {
+        console.error(`[API Group] Error creating group:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 2. LISTAR GRUPOS DO WHATSAPP
+app.get('/api/group/list/:instance', async(req, res) => {
+    const { instance } = req.params;
+
+    console.log(`[API Group] Listing groups for instance ${instance}`);
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chats = await session.client.getChats();
+        const groups = chats.filter(chat => chat.isGroup);
+
+        const groupList = groups.map(g => ({
+            id: g.id._serialized,
+            name: g.name,
+            participantsCount: g.participants ? g.participants.length : 0,
+            isReadOnly: g.isReadOnly,
+            timestamp: g.timestamp
+        }));
+
+        res.json({
+            success: true,
+            count: groupList.length,
+            groups: groupList
+        });
+    } catch (error) {
+        console.error(`[API Group] Error listing groups:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3. OBTER DETALHES DE UM GRUPO
+app.get('/api/group/info/:instance/:groupId', async(req, res) => {
+    const { instance, groupId } = req.params;
+
+    console.log(`[API Group] Getting info for group ${groupId}`);
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+        const chat = await session.client.getChatById(chatId);
+
+        if (!chat || !chat.isGroup) {
+            return res.status(404).json({ error: 'Grupo não encontrado' });
+        }
+
+        res.json({
+            success: true,
+            group: {
+                id: chat.id._serialized,
+                name: chat.name,
+                description: chat.description,
+                owner: chat.owner ?.id ?._serialized,
+                participants: chat.participants ?.map(p => ({
+                    id: p.id._serialized,
+                    isAdmin: p.isAdmin,
+                    isSuperAdmin: p.isSuperAdmin
+                })),
+                createdAt: chat.createdAt,
+                isReadOnly: chat.isReadOnly
+            }
+        });
+    } catch (error) {
+        console.error(`[API Group] Error getting group info:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 4. ADICIONAR PARTICIPANTES AO GRUPO
+app.post('/api/group/add-participants', async(req, res) => {
+    const { instance, groupId, participants } = req.body;
+
+    console.log(`[API Group] Adding participants to group ${groupId}`);
+    console.log(`[API Group] Participants:`, participants);
+
+    if (!instance || !groupId || !participants || !Array.isArray(participants)) {
+        return res.status(400).json({ error: 'instance, groupId e participants (array) são obrigatórios' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+        console.log(`[API Group] Fetching chat: ${chatId}`);
+
+        const chat = await session.client.getChatById(chatId);
+
+        if (!chat || !chat.isGroup) {
+            return res.status(404).json({ error: 'Grupo não encontrado' });
+        }
+
+        console.log(`[API Group] Group found: ${chat.name}`);
+
+        // Formatar números - garantir formato correto @c.us
+        const participantIds = participants.map(p => {
+            // Remover caracteres não numéricos
+            const phone = String(p).replace(/\D/g, '');
+            // Garantir que não tenha @ duplicado
+            if (phone.includes('@')) {
+                return phone;
+            }
+            return `${phone}@c.us`;
+        });
+
+        console.log(`[API Group] Formatted participant IDs:`, participantIds);
+
+        const result = await chat.addParticipants(participantIds);
+
+        console.log(`[API Group] Add participants result:`, JSON.stringify(result, null, 2));
+
+        // Verificar se o resultado é uma string de erro
+        if (typeof result === 'string' && result.includes('Error')) {
+            return res.status(400).json({
+                success: false,
+                message: result,
+                result: null
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Participantes processados',
+            result: result
+        });
+    } catch (error) {
+        console.error(`[API Group] Error adding participants:`, error);
+        console.error(`[API Group] Error stack:`, error.stack);
+
+        // Verificar se é o erro de LID
+        if (error.message && error.message.includes('Lid is missing')) {
+            return res.status(500).json({
+                error: 'Erro de sincronização do WhatsApp. Tente reconectar a instância ou aguarde alguns minutos.',
+                details: error.message,
+                suggestion: 'Este erro pode ocorrer quando o WhatsApp Web precisa sincronizar dados. Tente: 1) Aguardar alguns minutos, 2) Reiniciar a instância, 3) Verificar se o número está correto.'
+            });
+        }
+
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 5. REMOVER PARTICIPANTES DO GRUPO
+app.post('/api/group/remove-participants', async(req, res) => {
+    const { instance, groupId, participants } = req.body;
+
+    console.log(`[API Group] Removing participants from group ${groupId}`);
+
+    if (!instance || !groupId || !participants || !Array.isArray(participants)) {
+        return res.status(400).json({ error: 'instance, groupId e participants (array) são obrigatórios' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+        const chat = await session.client.getChatById(chatId);
+
+        if (!chat || !chat.isGroup) {
+            return res.status(404).json({ error: 'Grupo não encontrado' });
+        }
+
+        const participantIds = participants.map(p => {
+            const phone = p.replace(/\D/g, '');
+            return phone.includes('@') ? phone : `${phone}@c.us`;
+        });
+
+        const result = await chat.removeParticipants(participantIds);
+
+        res.json({
+            success: true,
+            message: 'Participantes removidos',
+            result: result
+        });
+    } catch (error) {
+        console.error(`[API Group] Error removing participants:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 6. ENVIAR MENSAGEM PARA GRUPO
+app.post('/api/group/send-message', async(req, res) => {
+    const { instance, groupId, message } = req.body;
+
+    console.log(`[API Group] Sending message to group ${groupId}`);
+
+    if (!instance || !groupId || !message) {
+        return res.status(400).json({ error: 'instance, groupId e message são obrigatórios' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+
+        const sentMsg = await session.client.sendMessage(chatId, message);
+
+        console.log(`[API Group] Message sent to group. ID: ${sentMsg.id._serialized}`);
+
+        // Salvar no banco
+        if (pool) {
+            await pool.execute(
+                `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+                 VALUES (?, ?, ?, 'group', 'sent', NOW())`, [instance, groupId, message]
+            );
+        }
+
+        res.json({
+            success: true,
+            message: 'Mensagem enviada para o grupo',
+            messageId: sentMsg.id._serialized
+        });
+    } catch (error) {
+        console.error(`[API Group] Error sending message to group:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 6.1 ENVIAR MÍDIA PARA GRUPO
+app.post('/api/group/send-media', upload.single('file'), async(req, res) => {
+    const { instance, groupId, caption, mediaUrl, mediaBase64, filename, mimetype } = req.body;
+
+    console.log(`[API Group] Sending media to group ${groupId}`);
+
+    if (!instance || !groupId) {
+        return res.status(400).json({ error: 'instance e groupId são obrigatórios' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        let media;
+
+        // Prioridade: arquivo upload > URL > Base64
+        if (req.file) {
+            media = MessageMedia.fromFilePath(req.file.path);
+            console.log(`[API Group] File uploaded: ${req.file.originalname}`);
+        } else if (mediaUrl) {
+            media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
+            console.log(`[API Group] Media from URL: ${mediaUrl}`);
+        } else if (mediaBase64 && mimetype) {
+            media = new MessageMedia(mimetype, mediaBase64, filename || 'arquivo');
+            console.log(`[API Group] Media from Base64`);
+        } else {
+            return res.status(400).json({ error: 'Nenhuma mídia fornecida (file, mediaUrl ou mediaBase64+mimetype)' });
+        }
+
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+        const sentMsg = await session.client.sendMessage(chatId, media, {
+            caption: caption || ''
+        });
+
+        console.log(`[API Group] Media sent to group. ID: ${sentMsg.id._serialized}`);
+
+        // Limpar arquivo temporário
+        if (req.file) {
+            fs.unlink(req.file.path, (err) => {
+                if (err) console.error('[API Group] Error deleting temp file:', err);
+            });
+        }
+
+        // Salvar no banco
+        if (pool) {
+            try {
+                await pool.execute(
+                    `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+                     VALUES (?, ?, ?, 'group_media', 'sent', NOW())`, [instance, groupId, caption || '[MEDIA]']
+                );
+            } catch (dbErr) {
+                console.error('[API Group] Error saving to DB:', dbErr);
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Mídia enviada para o grupo',
+            messageId: sentMsg.id._serialized
+        });
+    } catch (error) {
+        console.error(`[API Group] Error sending media to group:`, error);
+        if (req.file) {
+            fs.unlink(req.file.path, () => {});
+        }
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 7. OBTER LINK DE CONVITE DO GRUPO
+app.get('/api/group/invite-link/:instance/:groupId', async(req, res) => {
+    const { instance, groupId } = req.params;
+
+    console.log(`[API Group] Getting invite link for group ${groupId}`);
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+        const chat = await session.client.getChatById(chatId);
+
+        if (!chat || !chat.isGroup) {
+            return res.status(404).json({ error: 'Grupo não encontrado' });
+        }
+
+        const inviteCode = await chat.getInviteCode();
+
+        res.json({
+            success: true,
+            inviteCode: inviteCode,
+            inviteLink: `https://chat.whatsapp.com/${inviteCode}`
+        });
+    } catch (error) {
+        console.error(`[API Group] Error getting invite link:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 8. ATUALIZAR INFORMAÇÕES DO GRUPO (nome, descrição)
+app.post('/api/group/update', async(req, res) => {
+    const { instance, groupId, name, description } = req.body;
+
+    console.log(`[API Group] Updating group ${groupId}`);
+
+    if (!instance || !groupId) {
+        return res.status(400).json({ error: 'instance e groupId são obrigatórios' });
+    }
+
+    const session = sessions.get(instance);
+    if (!session || session.status !== 'CONNECTED' || !session.client) {
+        return res.status(503).json({ error: 'Instância não conectada' });
+    }
+
+    try {
+        const chatId = groupId.includes('@') ? groupId : `${groupId}@g.us`;
+        const chat = await session.client.getChatById(chatId);
+
+        if (!chat || !chat.isGroup) {
+            return res.status(404).json({ error: 'Grupo não encontrado' });
+        }
+
+        const results = {};
+
+        if (name) {
+            await chat.setSubject(name);
+            results.nameUpdated = true;
+        }
+
+        if (description !== undefined) {
+            await chat.setDescription(description);
+            results.descriptionUpdated = true;
+        }
+
+        res.json({
+            success: true,
+            message: 'Grupo atualizado',
+            results: results
+        });
+    } catch (error) {
+        console.error(`[API Group] Error updating group:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 9. LISTAR GRUPOS SALVOS NO BANCO LOCAL (para o sistema PHP)
+app.get('/api/local-groups/:instance', async(req, res) => {
+    const { instance } = req.params;
+
+    if (!pool) {
+        return res.status(500).json({ error: 'Banco de dados não conectado' });
+    }
+
+    try {
+        const [groups] = await pool.execute(
+            `SELECT g.*, 
+                    (SELECT COUNT(*) FROM whatsapp_group_members WHERE group_id = g.id) as member_count
+             FROM whatsapp_groups g 
+             WHERE g.instance_id = ? 
+             ORDER BY g.created_at DESC`, [instance]
+        );
+
+        res.json({
+            success: true,
+            count: groups.length,
+            groups: groups
+        });
+    } catch (error) {
+        console.error(`[API Group] Error listing local groups:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 10. SALVAR/CRIAR GRUPO LOCAL (para gerenciamento no PHP)
+app.post('/api/local-groups/create', async(req, res) => {
+    const { instance, name, description, members } = req.body;
+
+    if (!pool) {
+        return res.status(500).json({ error: 'Banco de dados não conectado' });
+    }
+
+    if (!instance || !name) {
+        return res.status(400).json({ error: 'instance e name são obrigatórios' });
+    }
+
+    try {
+        // Primeiro criar o grupo no WhatsApp
+        const session = sessions.get(instance);
+        if (!session || session.status !== 'CONNECTED' || !session.client) {
+            return res.status(503).json({ error: 'Instância não conectada' });
+        }
+
+        let participantList = [];
+        if (members && Array.isArray(members)) {
+            participantList = members.map(m => {
+                const phone = (m.phone || m).toString().replace(/\D/g, '');
+                return `${phone}@c.us`;
+            });
+        }
+
+        const result = await session.client.createGroup(name, participantList);
+        const groupId = result.gid ?._serialized || result.gid;
+
+        // Salvar no banco local
+        const [insertResult] = await pool.execute(
+            `INSERT INTO whatsapp_groups (instance_id, group_id, name, description, created_by) 
+             VALUES (?, ?, ?, ?, ?)`, [instance, groupId, name, description || '', session.client.info.wid.user]
+        );
+
+        const localGroupId = insertResult.insertId;
+
+        // Salvar membros
+        if (members && Array.isArray(members)) {
+            for (const member of members) {
+                const phone = (member.phone || member).toString().replace(/\D/g, '');
+                const memberName = member.name || '';
+                await pool.execute(
+                    `INSERT INTO whatsapp_group_members (group_id, phone_number, name) 
+                     VALUES (?, ?, ?)`, [localGroupId, phone, memberName]
+                );
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Grupo criado com sucesso',
+            localGroupId: localGroupId,
+            whatsappGroupId: groupId,
+            name: name
+        });
+    } catch (error) {
+        console.error(`[API Group] Error creating local group:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 11. ADICIONAR MEMBRO AO GRUPO LOCAL
+app.post('/api/local-groups/add-member', async(req, res) => {
+    const { localGroupId, phone, name } = req.body;
+
+    if (!pool) {
+        return res.status(500).json({ error: 'Banco de dados não conectado' });
+    }
+
+    if (!localGroupId || !phone) {
+        return res.status(400).json({ error: 'localGroupId e phone são obrigatórios' });
+    }
+
+    try {
+        // Buscar grupo local
+        const [groups] = await pool.execute(
+            'SELECT * FROM whatsapp_groups WHERE id = ?', [localGroupId]
+        );
+
+        if (groups.length === 0) {
+            return res.status(404).json({ error: 'Grupo local não encontrado' });
+        }
+
+        const group = groups[0];
+        const phoneClean = phone.replace(/\D/g, '');
+
+        // Adicionar no WhatsApp
+        const session = sessions.get(group.instance_id);
+        if (session && session.status === 'CONNECTED' && session.client) {
+            const chat = await session.client.getChatById(group.group_id);
+            if (chat && chat.isGroup) {
+                await chat.addParticipants([`${phoneClean}@c.us`]);
+            }
+        }
+
+        // Salvar no banco local
+        await pool.execute(
+            `INSERT INTO whatsapp_group_members (group_id, phone_number, name) 
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE name = ?`, [localGroupId, phoneClean, name || '', name || '']
+        );
+
+        res.json({
+            success: true,
+            message: 'Membro adicionado com sucesso'
+        });
+    } catch (error) {
+        console.error(`[API Group] Error adding member:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 12. LISTAR MEMBROS DE UM GRUPO LOCAL
+app.get('/api/local-groups/:localGroupId/members', async(req, res) => {
+    const { localGroupId } = req.params;
+
+    if (!pool) {
+        return res.status(500).json({ error: 'Banco de dados não conectado' });
+    }
+
+    try {
+        const [members] = await pool.execute(
+            'SELECT * FROM whatsapp_group_members WHERE group_id = ? ORDER BY added_at DESC', [localGroupId]
+        );
+
+        res.json({
+            success: true,
+            count: members.length,
+            members: members
+        });
+    } catch (error) {
+        console.error(`[API Group] Error listing members:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 13. ENVIAR MENSAGEM PARA GRUPO LOCAL (por ID local)
+app.post('/api/local-groups/send-message', async(req, res) => {
+    const { localGroupId, message } = req.body;
+
+    if (!pool) {
+        return res.status(500).json({ error: 'Banco de dados não conectado' });
+    }
+
+    if (!localGroupId || !message) {
+        return res.status(400).json({ error: 'localGroupId e message são obrigatórios' });
+    }
+
+    try {
+        // Buscar grupo local
+        const [groups] = await pool.execute(
+            'SELECT * FROM whatsapp_groups WHERE id = ?', [localGroupId]
+        );
+
+        if (groups.length === 0) {
+            return res.status(404).json({ error: 'Grupo local não encontrado' });
+        }
+
+        const group = groups[0];
+
+        const session = sessions.get(group.instance_id);
+        if (!session || session.status !== 'CONNECTED' || !session.client) {
+            return res.status(503).json({ error: 'Instância não conectada' });
+        }
+
+        const sentMsg = await session.client.sendMessage(group.group_id, message);
+
+        // Salvar no banco
+        await pool.execute(
+            `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+             VALUES (?, ?, ?, 'group', 'sent', NOW())`, [group.instance_id, group.group_id, message]
+        );
+
+        res.json({
+            success: true,
+            message: 'Mensagem enviada para o grupo',
+            messageId: sentMsg.id._serialized,
+            groupName: group.name
+        });
+    } catch (error) {
+        console.error(`[API Group] Error sending message to local group:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Initialize
+const PORT = process.env.PORT || 3000;
+
+// ========================================
+// SISTEMA DE MONITORAMENTO DE SAÚDE APRIMORADO
+// ========================================
+let healthCheckInterval = null;
+let deepHealthCheckInterval = null;
+
+async function healthCheck() {
+    const now = Date.now();
+    console.log(`[HealthCheck] 🏥 Verificando ${sessions.size} sessões...`);
+
+    for (const [instanceId, session] of sessions.entries()) {
+        try {
+            // 1. Verificar se o cliente existe
+            if (!session.client) {
+                console.log(`[HealthCheck] ${instanceId}: ❌ Cliente nulo`);
+                if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
+                if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+                sessions.delete(instanceId);
+                continue;
+            }
+
+            // 2. Verificar se o Browser ainda está conectado
+            if (session.client.pupBrowser && !session.client.pupBrowser.isConnected()) {
+                console.log(`[HealthCheck] ${instanceId}: ❌ Browser desconectado`);
+                if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
+                if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+                sessions.delete(instanceId);
+                await updateInstanceStatus(instanceId, 0);
+
+                // Reconectar com delay aleatório para evitar sobrecarga
+                const delay = 5000 + Math.random() * 5000;
+                setTimeout(() => {
+                    if (!sessions.has(instanceId)) {
+                        console.log(`[HealthCheck] ${instanceId}: 🔄 Reconectando...`);
+                        startSession(instanceId);
+                    }
+                }, delay);
+                continue;
+            }
+
+            // 3. Verificar se a página está fechada
+            if (session.client.pupPage && session.client.pupPage.isClosed()) {
+                console.log(`[HealthCheck] ${instanceId}: ❌ Página fechada`);
+                if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
+                if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+
+                try {
+                    await session.client.destroy();
+                } catch (e) {}
+
+                sessions.delete(instanceId);
+                await updateInstanceStatus(instanceId, 0);
+
+                setTimeout(() => {
+                    if (!sessions.has(instanceId)) {
+                        startSession(instanceId);
+                    }
+                }, 5000);
+                continue;
+            }
+
+            // 4. Verificar inatividade (mais de 3 minutos sem atividade) - reduzido de 5 min
+            const inactiveTime = now - (session.lastActivity || now);
+            if (session.status === 'CONNECTED' && inactiveTime > 180000) {
+                console.log(`[HealthCheck] ${instanceId}: ⚠️ Inativo há ${Math.round(inactiveTime/1000)}s, verificando...`);
+
+                try {
+                    // Tentar obter estado com timeout
+                    const state = await Promise.race([
+                        session.client.getState(),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 15000))
+                    ]);
+
+                    if (state === 'CONNECTED') {
+                        session.lastActivity = now;
+                        console.log(`[HealthCheck] ${instanceId}: ✅ Ainda conectado`);
+                    } else if (state === 'CONFLICT') {
+                        console.log(`[HealthCheck] ${instanceId}: ⚠️ Conflito detectado, tentando takeover...`);
+                        try {
+                            await session.client.pupPage.evaluate(() => window.Store.AppState.takeover());
+                        } catch (e) {}
+                    } else {
+                        console.log(`[HealthCheck] ${instanceId}: ⚠️ Estado: ${state}`);
+                    }
+                } catch (e) {
+                    console.log(`[HealthCheck] ${instanceId}: ❌ Não responde: ${e.message}`);
+
+                    // Incrementar contador de falhas
+                    session.consecutiveFailures = (session.consecutiveFailures || 0) + 1;
+
+                    if (session.consecutiveFailures >= 2) {
+                        // Limpar e reconectar
+                        if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
+                        if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+
+                        try {
+                            await Promise.race([
+                                session.client.destroy(),
+                                new Promise(resolve => setTimeout(resolve, 5000))
+                            ]);
+                        } catch (destroyErr) {}
+
+                        sessions.delete(instanceId);
+                        await updateInstanceStatus(instanceId, 0);
+
+                        setTimeout(() => {
+                            if (!sessions.has(instanceId)) {
+                                startSession(instanceId);
+                            }
+                        }, 10000);
+                    }
+                }
+            }
+
+            // 5. Verificar sessões travadas em LOADING por mais de 2 minutos (reduzido de 3 min)
+            if (session.status.startsWith('LOADING_') || session.status === 'INITIALIZING') {
+                const loadingTime = now - (session.loadingStartTime || now);
+                if (loadingTime > 120000) { // 2 minutos
+                    console.log(`[HealthCheck] ${instanceId}: ❌ Travado em ${session.status} há ${Math.round(loadingTime/1000)}s`);
+
+                    if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
+                    if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+
+                    try {
+                        await session.client.destroy();
+                    } catch (e) {}
+
+                    sessions.delete(instanceId);
+                    await updateInstanceStatus(instanceId, 0);
+
+                    // Reconectar após 20 segundos (reduzido de 30s)
+                    setTimeout(() => {
+                        if (!sessions.has(instanceId)) {
+                            startSession(instanceId);
+                        }
+                    }, 20000);
+                }
+            }
+
+            // 6. Verificar tempo desde último ping bem-sucedido
+            if (session.status === 'CONNECTED' && session.lastPing) {
+                const timeSinceLastPing = now - session.lastPing;
+                if (timeSinceLastPing > 90000) { // Mais de 1.5 minutos sem ping
+                    console.log(`[HealthCheck] ${instanceId}: ⚠️ Sem ping há ${Math.round(timeSinceLastPing/1000)}s`);
+                }
+            }
+        } catch (err) {
+            console.error(`[HealthCheck] Erro em ${instanceId}:`, err.message);
+        }
+    }
+}
+
+// Verificar instâncias que deveriam estar ativas mas não estão
+async function checkMissingInstances() {
+    if (!pool) return;
+
+    try {
+        const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
+
+        for (const row of rows) {
+            if (!sessions.has(row.id)) {
+                console.log(`[HealthCheck] 🔄 Instância ${row.id} deveria estar ativa. Iniciando...`);
+                startSession(row.id);
+                // Aguardar um pouco entre inicializações para não sobrecarregar
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+        }
+    } catch (err) {
+        console.error('[HealthCheck] Erro ao verificar instâncias:', err.message);
+    }
+}
+
+// Deep health check - verificação mais profunda a cada 5 minutos
+async function deepHealthCheck() {
+    console.log(`[DeepHealthCheck] 🔬 Verificação profunda iniciada...`);
+
+    for (const [instanceId, session] of sessions.entries()) {
+        if (session.status !== 'CONNECTED' || !session.client) continue;
+
+        try {
+            // Verificar se consegue executar operações básicas
+            const canOperate = await Promise.race([
+                (async() => {
+                    // Tentar obter informações básicas
+                    const state = await session.client.getState();
+                    if (state !== 'CONNECTED') return false;
+
+                    // Tentar verificar se o Store está disponível
+                    const storeOk = await session.client.pupPage.evaluate(() => {
+                        return typeof window.Store !== 'undefined' &&
+                            typeof window.Store.Chat !== 'undefined';
+                    });
+
+                    return storeOk;
+                })(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 20000))
+            ]);
+
+            if (!canOperate) {
+                console.log(`[DeepHealthCheck] ${instanceId}: ⚠️ Sessão não operacional`);
+            } else {
+                console.log(`[DeepHealthCheck] ${instanceId}: ✅ Operacional`);
+            }
+        } catch (err) {
+            console.error(`[DeepHealthCheck] ${instanceId}: ❌ Erro: ${err.message}`);
+        }
+    }
+}
+
+function startHealthCheck() {
+    // Health check a cada 45 segundos (reduzido de 1 minuto)
+    healthCheckInterval = setInterval(async() => {
+        await healthCheck();
+        await checkMissingInstances();
+    }, 45000); // 45 segundos
+
+    // Deep health check a cada 5 minutos
+    deepHealthCheckInterval = setInterval(async() => {
+        await deepHealthCheck();
+    }, 300000); // 5 minutos
+
+    console.log('[HealthCheck] 🏥 Sistema de monitoramento iniciado (intervalo: 45s, deep: 5min)');
+}
+
+function stopHealthCheck() {
+    if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+        healthCheckInterval = null;
+    }
+    if (deepHealthCheckInterval) {
+        clearInterval(deepHealthCheckInterval);
+        deepHealthCheckInterval = null;
+    }
+}
+
+// ========================================
+// INICIALIZAÇÃO
+// ========================================
+
+(async() => {
+    await initDB();
+    await initGroupsTable();
+
+    // Iniciar health check após 30 segundos (reduzido de 1 minuto)
+    setTimeout(() => {
+        startHealthCheck();
+    }, 30000);
+
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+        console.log(`\n📋 API de Grupos disponível:`);
+        console.log(`   POST /api/group/create - Criar grupo`);
+        console.log(`   GET  /api/group/list/:instance - Listar grupos`);
+        console.log(`   GET  /api/group/info/:instance/:groupId - Info do grupo`);
+        console.log(`   POST /api/group/add-participants - Adicionar membros`);
+        console.log(`   POST /api/group/remove-participants - Remover membros`);
+        console.log(`   POST /api/group/send-message - Enviar mensagem`);
+        console.log(`   GET  /api/group/invite-link/:instance/:groupId - Link de convite`);
+        console.log(`   POST /api/group/update - Atualizar grupo`);
+        console.log(`\n📋 API de Grupos Locais (para PHP):`);
+        console.log(`   GET  /api/local-groups/:instance - Listar grupos locais`);
+        console.log(`   POST /api/local-groups/create - Criar grupo local`);
+        console.log(`   POST /api/local-groups/add-member - Adicionar membro`);
+        console.log(`   GET  /api/local-groups/:id/members - Listar membros`);
+        console.log(`   POST /api/local-groups/send-message - Enviar mensagem`);
+        console.log(`\n🔄 Sistema de reconexão automática: ATIVO (max 10 tentativas)`);
+        console.log(`🏥 Health Check: Iniciará em 30 segundos (intervalo: 45s)`);
+        console.log(`🔬 Deep Health Check: A cada 5 minutos`);
+        console.log(`💓 Keep-Alive: A cada 20 segundos`);
+        console.log(`📡 Monitor de Conexão: A cada 45 segundos`);
+    });
+})();
