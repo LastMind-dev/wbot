@@ -112,15 +112,27 @@ function saveLocalData() {
 // ========================================
 async function loadInstances() {
     try {
-        const res = await fetch('/api/health');
+        // First try to load from database API (persistent)
+        const res = await fetch('/api/instances');
         const data = await res.json();
 
-        if (data.sessions && data.sessions.list) {
-            instances = data.sessions.list;
+        if (data.success && data.instances) {
+            instances = data.instances;
             renderInstancesTable();
             renderFullInstancesTable();
             populateInstanceSelects();
             updateStats();
+        } else {
+            // Fallback to health API (in-memory only)
+            const healthRes = await fetch('/api/health');
+            const healthData = await healthRes.json();
+            if (healthData.sessions && healthData.sessions.list) {
+                instances = healthData.sessions.list;
+                renderInstancesTable();
+                renderFullInstancesTable();
+                populateInstanceSelects();
+                updateStats();
+            }
         }
     } catch (err) {
         showNotification('Erro ao carregar instâncias: ' + err.message, 'error');
