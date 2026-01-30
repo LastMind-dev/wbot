@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Bot - Dashboard Administrativo</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uikit@3.18.0/dist/css/uikit.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/uikit@3.18.0/dist/js/uikit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/uikit@3.18.0/dist/js/uikit-icons.min.js"></script>
+    <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+    <!-- Sidebar -->
+    <nav class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <span uk-icon="icon: whatsapp; ratio: 1.2"></span> Wbot<span>Admin</span>
+        </div>
+        
+        <div class="sidebar-section-title">Principal</div>
+        <ul class="sidebar-nav">
+            <li><a href="#" class="active" data-section="dashboard"><span uk-icon="icon: home"></span> Dashboard</a></li>
+            <li><a href="#" data-section="instances"><span uk-icon="icon: server"></span> Instâncias</a></li>
+        </ul>
+        
+        <div class="sidebar-section-title">Gerenciamento</div>
+        <ul class="sidebar-nav">
+            <li><a href="#" data-section="groups"><span uk-icon="icon: users"></span> Grupos</a></li>
+            <li><a href="#" data-section="users"><span uk-icon="icon: user"></span> Usuários</a></li>
+            <li><a href="#" data-section="messages"><span uk-icon="icon: commenting"></span> Mensagens</a></li>
+        </ul>
+        
+        <div class="sidebar-section-title">Ferramentas</div>
+        <ul class="sidebar-nav">
+            <li><a href="#" data-section="testing"><span uk-icon="icon: flask"></span> Testes</a></li>
+            <li><a href="#" data-section="settings"><span uk-icon="icon: cog"></span> Configurações</a></li>
+        </ul>
+        
+        <div class="sidebar-section-title">Sistema</div>
+        <ul class="sidebar-nav">
+            <li><a href="/logout"><span uk-icon="icon: sign-out"></span> Sair</a></li>
+        </ul>
+    </nav>
+    
+    <button class="mobile-menu-toggle" onclick="toggleSidebar()">
+        <span uk-icon="icon: menu; ratio: 1.5"></span>
+    </button>
+    
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- DASHBOARD SECTION -->
+        <section id="section-dashboard" class="page-section active">
+            <div class="page-header">
+                <h1 class="page-title">Dashboard</h1>
+                <button class="uk-button uk-button-default uk-button-small" onclick="refreshDashboard()">
+                    <span uk-icon="icon: refresh"></span> Atualizar
+                </button>
+            </div>
+            
+            <div class="uk-grid-small uk-child-width-1-4@l uk-child-width-1-2@s" uk-grid>
+                <div><div class="stat-card"><div class="stat-icon primary"><span uk-icon="icon: server; ratio: 1.2"></span></div><div class="stat-value" id="stat-instances">0</div><div class="stat-label">Instâncias Ativas</div></div></div>
+                <div><div class="stat-card"><div class="stat-icon success"><span uk-icon="icon: check; ratio: 1.2"></span></div><div class="stat-value" id="stat-connected">0</div><div class="stat-label">Conectadas</div></div></div>
+                <div><div class="stat-card"><div class="stat-icon warning"><span uk-icon="icon: users; ratio: 1.2"></span></div><div class="stat-value" id="stat-groups">0</div><div class="stat-label">Grupos</div></div></div>
+                <div><div class="stat-card"><div class="stat-icon danger"><span uk-icon="icon: mail; ratio: 1.2"></span></div><div class="stat-value" id="stat-messages">0</div><div class="stat-label">Mensagens Hoje</div></div></div>
+            </div>
+            
+            <div class="uk-grid-match uk-child-width-1-2@m uk-margin-top" uk-grid>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: bolt"></span> Ações Rápidas</h3></div>
+                        <div class="content-card-body">
+                            <div class="uk-grid-small" uk-grid>
+                                <div class="uk-width-1-2"><button class="uk-button uk-button-whatsapp uk-width-1-1" onclick="showSection('testing')"><span uk-icon="icon: commenting"></span> Enviar Mensagem</button></div>
+                                <div class="uk-width-1-2"><button class="uk-button uk-button-purple uk-width-1-1" onclick="showSection('groups')"><span uk-icon="icon: users"></span> Gerenciar Grupos</button></div>
+                                <div class="uk-width-1-2 uk-margin-small-top"><button class="uk-button uk-button-default uk-width-1-1" onclick="showSection('users')"><span uk-icon="icon: user"></span> Gerenciar Usuários</button></div>
+                                <div class="uk-width-1-2 uk-margin-small-top"><button class="uk-button uk-button-default uk-width-1-1" onclick="showSection('instances')"><span uk-icon="icon: server"></span> Nova Instância</button></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: history"></span> Atividade Recente</h3></div>
+                        <div class="content-card-body" id="recent-activity">
+                            <div class="empty-state"><span uk-icon="icon: clock; ratio: 3"></span><p>Nenhuma atividade recente</p></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="content-card uk-margin-top">
+                <div class="content-card-header">
+                    <h3><span uk-icon="icon: server"></span> Status das Instâncias</h3>
+                    <button class="uk-button uk-button-small uk-button-primary" onclick="showSection('instances')">Ver Todas</button>
+                </div>
+                <div class="content-card-body">
+                    <div class="uk-overflow-auto">
+                        <table class="uk-table uk-table-hover uk-table-middle">
+                            <thead><tr><th>Nome</th><th>Telefone</th><th>Status</th><th>Última Conexão</th><th class="uk-text-right">Ações</th></tr></thead>
+                            <tbody id="instances-table-body"><tr><td colspan="5" class="uk-text-center uk-text-muted">Carregando...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- INSTANCES SECTION -->
+        <section id="section-instances" class="page-section">
+            <div class="page-header">
+                <h1 class="page-title">Gerenciamento de Instâncias</h1>
+                <button class="uk-button uk-button-primary" uk-toggle="target: #modal-new-instance"><span uk-icon="icon: plus"></span> Nova Instância</button>
+            </div>
+            
+            <div class="content-card">
+                <div class="content-card-header">
+                    <h3>Instâncias WhatsApp</h3>
+                    <button class="uk-button uk-button-default uk-button-small" onclick="loadInstances()"><span uk-icon="icon: refresh"></span> Atualizar</button>
+                </div>
+                <div class="content-card-body">
+                    <div class="uk-overflow-auto">
+                        <table class="uk-table uk-table-hover uk-table-middle uk-table-divider">
+                            <thead><tr><th>Nome</th><th>ID</th><th>Telefone</th><th>URL PHP</th><th>Status</th><th class="uk-text-right">Ações</th></tr></thead>
+                            <tbody id="full-instances-table"><tr><td colspan="6" class="uk-text-center uk-text-muted">Carregando...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- GROUPS SECTION -->
+        <section id="section-groups" class="page-section">
+            <div class="page-header">
+                <h1 class="page-title">Gerenciamento de Grupos</h1>
+                <button class="uk-button uk-button-primary" uk-toggle="target: #modal-new-group"><span uk-icon="icon: plus"></span> Novo Grupo</button>
+            </div>
+            
+            <div class="instance-selector-bar">
+                <label class="uk-form-label">Instância:</label>
+                <select class="uk-select uk-form-width-medium" id="groups-instance-select" onchange="loadGroups()"><option value="">Selecione uma instância</option></select>
+                <span id="groups-connection-status"></span>
+            </div>
+            
+            <div class="uk-grid-match uk-child-width-1-2@m" uk-grid>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header">
+                            <h3><span uk-icon="icon: list"></span> Grupos (<span id="groups-count">0</span>)</h3>
+                            <button class="uk-button uk-button-default uk-button-small" onclick="loadGroups()"><span uk-icon="icon: refresh"></span></button>
+                        </div>
+                        <div class="content-card-body" style="max-height: 500px; overflow-y: auto;">
+                            <div id="groups-list"><div class="empty-state"><span uk-icon="icon: users; ratio: 3"></span><p>Selecione uma instância para ver os grupos</p></div></div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: info"></span> Detalhes do Grupo</h3></div>
+                        <div class="content-card-body" id="group-details"><div class="empty-state"><span uk-icon="icon: file-text; ratio: 3"></span><p>Selecione um grupo para ver os detalhes</p></div></div>
+                    </div>
+                    
+                    <div class="content-card uk-margin-top">
+                        <div class="content-card-header"><h3><span uk-icon="icon: commenting"></span> Enviar Mensagem</h3></div>
+                        <div class="content-card-body">
+                            <div class="uk-margin">
+                                <label class="uk-form-label">Grupo Selecionado:</label>
+                                <input class="uk-input" type="text" id="selected-group-name" readonly placeholder="Nenhum grupo selecionado">
+                                <input type="hidden" id="selected-group-id">
+                            </div>
+                            <div class="uk-margin">
+                                <label class="uk-form-label">Mensagem:</label>
+                                <textarea class="uk-textarea" rows="3" id="group-message-text" placeholder="Digite sua mensagem..."></textarea>
+                            </div>
+                            <button class="uk-button uk-button-whatsapp uk-width-1-1" onclick="sendGroupMessage()"><span uk-icon="icon: send"></span> Enviar</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- USERS SECTION -->
+        <section id="section-users" class="page-section">
+            <div class="page-header">
+                <h1 class="page-title">Gerenciamento de Usuários</h1>
+                <button class="uk-button uk-button-primary" uk-toggle="target: #modal-new-user"><span uk-icon="icon: plus"></span> Novo Usuário</button>
+            </div>
+            
+            <div class="instance-selector-bar">
+                <div class="uk-search uk-search-default">
+                    <span uk-search-icon></span>
+                    <input class="uk-search-input" type="search" id="users-search" placeholder="Buscar usuário..." oninput="filterUsers()">
+                </div>
+                <select class="uk-select uk-form-width-small" id="users-filter-group" onchange="filterUsers()"><option value="">Todos os Grupos</option></select>
+                <button class="uk-button uk-button-default uk-button-small" onclick="exportUsers()"><span uk-icon="icon: download"></span> Exportar</button>
+                <button class="uk-button uk-button-default uk-button-small" uk-toggle="target: #modal-import-users"><span uk-icon="icon: upload"></span> Importar</button>
+            </div>
+            
+            <div class="content-card">
+                <div class="content-card-header"><h3>Lista de Usuários / Números</h3></div>
+                <div class="content-card-body">
+                    <div class="uk-overflow-auto">
+                        <table class="uk-table uk-table-hover uk-table-middle uk-table-divider">
+                            <thead><tr><th><input class="uk-checkbox" type="checkbox" id="select-all-users" onchange="toggleSelectAllUsers()"></th><th>Nome</th><th>Número</th><th>Grupo</th><th>Status</th><th>Criado em</th><th class="uk-text-right">Ações</th></tr></thead>
+                            <tbody id="users-table-body"><tr><td colspan="7" class="uk-text-center uk-text-muted"><div class="empty-state"><span uk-icon="icon: users; ratio: 2"></span><p>Nenhum usuário cadastrado</p></div></td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- MESSAGES SECTION -->
+        <section id="section-messages" class="page-section">
+            <div class="page-header"><h1 class="page-title">Mensagens</h1></div>
+            
+            <ul uk-tab>
+                <li class="uk-active"><a href="#">Histórico de Envios</a></li>
+                <li><a href="#">Templates</a></li>
+                <li><a href="#">Agendamentos</a></li>
+            </ul>
+            
+            <ul class="uk-switcher uk-margin">
+                <li>
+                    <div class="content-card">
+                        <div class="content-card-header">
+                            <h3>Histórico de Mensagens Enviadas</h3>
+                            <div class="uk-flex uk-flex-middle">
+                                <input class="uk-input uk-form-width-medium" type="date" id="messages-date-filter">
+                                <button class="uk-button uk-button-default uk-button-small uk-margin-small-left" onclick="filterMessageHistory()">Filtrar</button>
+                            </div>
+                        </div>
+                        <div class="content-card-body" id="message-history-container"><div id="message-history-list"></div></div>
+                    </div>
+                </li>
+                <li>
+                    <div class="content-card">
+                        <div class="content-card-header">
+                            <h3>Templates de Mensagem</h3>
+                            <button class="uk-button uk-button-primary uk-button-small" uk-toggle="target: #modal-new-template"><span uk-icon="icon: plus"></span> Novo Template</button>
+                        </div>
+                        <div class="content-card-body" id="templates-container"><div class="uk-grid-small uk-child-width-1-3@m" uk-grid id="templates-grid"></div></div>
+                    </div>
+                </li>
+                <li>
+                    <div class="content-card">
+                        <div class="content-card-header">
+                            <h3>Mensagens Agendadas</h3>
+                            <button class="uk-button uk-button-primary uk-button-small" uk-toggle="target: #modal-schedule-message"><span uk-icon="icon: plus"></span> Agendar</button>
+                        </div>
+                        <div class="content-card-body">
+                            <table class="uk-table uk-table-hover uk-table-middle uk-table-divider">
+                                <thead><tr><th>Destinatário</th><th>Mensagem</th><th>Data/Hora</th><th>Status</th><th class="uk-text-right">Ações</th></tr></thead>
+                                <tbody id="scheduled-messages-body"><tr><td colspan="5" class="uk-text-center uk-text-muted">Nenhuma mensagem agendada</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </li>
+            </ul>
+        </section>
+        
+        <!-- TESTING SECTION -->
+        <section id="section-testing" class="page-section">
+            <div class="page-header"><h1 class="page-title">Teste de Mensagens</h1></div>
+            
+            <div class="instance-selector-bar">
+                <label class="uk-form-label">Instância:</label>
+                <select class="uk-select uk-form-width-medium" id="testing-instance-select"><option value="">Selecione uma instância</option></select>
+                <span id="testing-connection-status"></span>
+            </div>
+            
+            <div class="uk-grid-match uk-child-width-1-2@m" uk-grid>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: pencil"></span> Compor Mensagem</h3></div>
+                        <div class="content-card-body">
+                            <ul uk-tab><li class="uk-active"><a href="#">Texto</a></li><li><a href="#">Mídia</a></li></ul>
+                            <ul class="uk-switcher uk-margin">
+                                <li>
+                                    <div class="uk-margin">
+                                        <label class="uk-form-label">Tipo de Destinatário:</label>
+                                        <select class="uk-select" id="test-recipient-type" onchange="toggleRecipientInput()">
+                                            <option value="individual">Número Individual</option>
+                                            <option value="group">Grupo</option>
+                                        </select>
+                                    </div>
+                                    <div class="uk-margin" id="individual-recipient-div">
+                                        <label class="uk-form-label">Número (com DDI):</label>
+                                        <input class="uk-input" type="text" id="test-recipient" placeholder="5511999999999">
+                                    </div>
+                                    <div class="uk-margin uk-hidden" id="group-recipient-div">
+                                        <label class="uk-form-label">Grupo:</label>
+                                        <select class="uk-select" id="test-recipient-group"><option value="">Selecione um grupo</option></select>
+                                    </div>
+                                    <div class="uk-margin">
+                                        <label class="uk-form-label">Mensagem:</label>
+                                        <textarea class="uk-textarea" rows="5" id="test-message" placeholder="Digite sua mensagem de teste..." oninput="updatePreview()"></textarea>
+                                    </div>
+                                    <div class="uk-margin"><label><input class="uk-checkbox" type="checkbox" id="test-simulate-only"> Apenas simular (não enviar)</label></div>
+                                    <button class="uk-button uk-button-whatsapp uk-width-1-1" onclick="sendTestMessage()"><span uk-icon="icon: send"></span> Enviar Mensagem de Teste</button>
+                                </li>
+                                <li>
+                                    <div class="uk-margin">
+                                        <label class="uk-form-label">Número (com DDI):</label>
+                                        <input class="uk-input" type="text" id="test-media-recipient" placeholder="5511999999999">
+                                    </div>
+                                    <div class="uk-margin">
+                                        <label class="uk-form-label">Tipo de Mídia:</label>
+                                        <select class="uk-select" id="test-media-type"><option value="image">Imagem</option><option value="document">Documento</option><option value="video">Vídeo</option><option value="audio">Áudio</option></select>
+                                    </div>
+                                    <div class="uk-margin">
+                                        <label class="uk-form-label">URL da Mídia:</label>
+                                        <input class="uk-input" type="url" id="test-media-url" placeholder="https://example.com/image.jpg">
+                                    </div>
+                                    <div class="uk-margin">
+                                        <label class="uk-form-label">Legenda (opcional):</label>
+                                        <textarea class="uk-textarea" rows="3" id="test-media-caption" placeholder="Legenda da mídia..."></textarea>
+                                    </div>
+                                    <button class="uk-button uk-button-whatsapp uk-width-1-1" onclick="sendTestMedia()"><span uk-icon="icon: image"></span> Enviar Mídia de Teste</button>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: phone"></span> Preview</h3></div>
+                        <div class="content-card-body">
+                            <div class="message-preview" id="message-preview">
+                                <div class="message-bubble">
+                                    <div id="preview-text">Digite uma mensagem para ver o preview...</div>
+                                    <div class="time" id="preview-time">00:00</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="content-card uk-margin-top">
+                        <div class="content-card-header">
+                            <h3><span uk-icon="icon: history"></span> Histórico de Testes</h3>
+                            <button class="uk-button uk-button-default uk-button-small" onclick="clearTestHistory()"><span uk-icon="icon: trash"></span> Limpar</button>
+                        </div>
+                        <div class="content-card-body" style="max-height: 300px; overflow-y: auto;">
+                            <div id="test-history-list"><div class="empty-state"><span uk-icon="icon: clock; ratio: 2"></span><p>Nenhum teste realizado</p></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- SETTINGS SECTION -->
+        <section id="section-settings" class="page-section">
+            <div class="page-header"><h1 class="page-title">Configurações</h1></div>
+            
+            <div class="uk-grid-match uk-child-width-1-2@m" uk-grid>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: settings"></span> Configurações Gerais</h3></div>
+                        <div class="content-card-body">
+                            <div class="uk-margin"><label class="uk-form-label">URL do Sistema PHP (Padrão):</label><input class="uk-input" type="url" id="setting-php-url" placeholder="https://seu-sistema.com/api"></div>
+                            <div class="uk-margin"><label class="uk-form-label">Webhook Global:</label><input class="uk-input" type="url" id="setting-webhook" placeholder="https://seu-sistema.com/webhook"></div>
+                            <div class="uk-margin"><label><input class="uk-checkbox" type="checkbox" id="setting-auto-reconnect" checked> Reconectar automaticamente instâncias</label></div>
+                            <div class="uk-margin"><label><input class="uk-checkbox" type="checkbox" id="setting-log-messages" checked> Registrar histórico de mensagens</label></div>
+                            <button class="uk-button uk-button-primary" onclick="saveGeneralSettings()"><span uk-icon="icon: check"></span> Salvar Configurações</button>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="content-card">
+                        <div class="content-card-header"><h3><span uk-icon="icon: info"></span> Informações do Sistema</h3></div>
+                        <div class="content-card-body" id="system-info">
+                            <div class="uk-margin"><strong>Versão:</strong> <span id="info-version">1.0.0</span></div>
+                            <div class="uk-margin"><strong>Memória Usada:</strong> <span id="info-memory">-</span></div>
+                            <div class="uk-margin"><strong>Uptime:</strong> <span id="info-uptime">-</span></div>
+                            <div class="uk-margin"><strong>Sessões Ativas:</strong> <span id="info-sessions">-</span></div>
+                            <hr>
+                            <button class="uk-button uk-button-danger uk-button-small" onclick="forceHealthCheck()"><span uk-icon="icon: refresh"></span> Forçar Health Check</button>
+                        </div>
+                    </div>
+                    
+                    <div class="content-card uk-margin-top">
+                        <div class="content-card-header"><h3><span uk-icon="icon: lock"></span> Segurança</h3></div>
+                        <div class="content-card-body">
+                            <div class="uk-margin">
+                                <label class="uk-form-label">Alterar Senha:</label>
+                                <input class="uk-input uk-margin-small-bottom" type="password" id="current-password" placeholder="Senha atual">
+                                <input class="uk-input uk-margin-small-bottom" type="password" id="new-password" placeholder="Nova senha">
+                                <input class="uk-input" type="password" id="confirm-password" placeholder="Confirmar nova senha">
+                            </div>
+                            <button class="uk-button uk-button-primary" onclick="changePassword()"><span uk-icon="icon: lock"></span> Alterar Senha</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+    
+    <!-- MODALS -->
+    <div id="modal-new-instance" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title"><span uk-icon="icon: server"></span> Nova Instância WhatsApp</h2>
+            <form id="form-new-instance" onsubmit="createInstance(event)">
+                <div class="uk-margin"><label class="uk-form-label">Nome da Instância *</label><input class="uk-input" type="text" id="new-instance-name" placeholder="Ex: Atendimento Principal" required></div>
+                <div class="uk-margin"><label class="uk-form-label">URL do Sistema PHP *</label><input class="uk-input" type="url" id="new-instance-php-url" placeholder="https://seu-sistema.com/api/retorno.php" required></div>
+                <div class="uk-margin"><label class="uk-form-label">Webhook (Opcional)</label><input class="uk-input" type="url" id="new-instance-webhook" placeholder="https://seu-sistema.com/webhook"></div>
+                <div class="uk-margin uk-text-right">
+                    <button class="uk-button uk-button-default uk-modal-close" type="button">Cancelar</button>
+                    <button class="uk-button uk-button-primary" type="submit"><span uk-icon="icon: plus"></span> Criar Instância</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="modal-qr-code" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body uk-text-center">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title">Escaneie o QR Code</h2>
+            <p class="uk-text-muted">Abra o WhatsApp no seu celular e escaneie o código</p>
+            <div id="qr-code-container" class="uk-margin"><div uk-spinner="ratio: 2"></div></div>
+        </div>
+    </div>
+    
+    <div id="modal-new-group" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title"><span uk-icon="icon: users"></span> Criar Novo Grupo</h2>
+            <form id="form-new-group" onsubmit="createGroup(event)">
+                <div class="uk-margin"><label class="uk-form-label">Nome do Grupo *</label><input class="uk-input" type="text" id="new-group-name" placeholder="Ex: Clientes VIP" required></div>
+                <div class="uk-margin"><label class="uk-form-label">Descrição</label><textarea class="uk-textarea" rows="2" id="new-group-description" placeholder="Descrição do grupo (opcional)"></textarea></div>
+                <div class="uk-margin"><label class="uk-form-label">Participantes (um número por linha, com DDI)</label><textarea class="uk-textarea" rows="4" id="new-group-participants" placeholder="5511999999999&#10;5511888888888"></textarea></div>
+                <div class="uk-margin uk-text-right">
+                    <button class="uk-button uk-button-default uk-modal-close" type="button">Cancelar</button>
+                    <button class="uk-button uk-button-primary" type="submit"><span uk-icon="icon: plus"></span> Criar Grupo</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="modal-add-participants" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title"><span uk-icon="icon: user-plus"></span> Adicionar Participantes</h2>
+            <form id="form-add-participants" onsubmit="addParticipants(event)">
+                <input type="hidden" id="add-participants-group-id">
+                <div class="uk-margin"><label class="uk-form-label">Grupo:</label><input class="uk-input" type="text" id="add-participants-group-name" readonly></div>
+                <div class="uk-margin"><label class="uk-form-label">Números (um por linha, com DDI)</label><textarea class="uk-textarea" rows="5" id="add-participants-numbers" placeholder="5511999999999&#10;5511888888888" required></textarea></div>
+                <div class="uk-margin uk-text-right">
+                    <button class="uk-button uk-button-default uk-modal-close" type="button">Cancelar</button>
+                    <button class="uk-button uk-button-primary" type="submit"><span uk-icon="icon: check"></span> Adicionar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="modal-new-user" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title"><span uk-icon="icon: user"></span> Novo Usuário</h2>
+            <form id="form-new-user" onsubmit="createUser(event)">
+                <div class="uk-margin"><label class="uk-form-label">Nome *</label><input class="uk-input" type="text" id="new-user-name" placeholder="Nome completo" required></div>
+                <div class="uk-margin"><label class="uk-form-label">Número WhatsApp * (com DDI)</label><input class="uk-input" type="text" id="new-user-number" placeholder="5511999999999" required></div>
+                <div class="uk-margin"><label class="uk-form-label">Email (opcional)</label><input class="uk-input" type="email" id="new-user-email" placeholder="email@exemplo.com"></div>
+                <div class="uk-margin"><label class="uk-form-label">Grupo</label><select class="uk-select" id="new-user-group"><option value="">Sem grupo</option></select></div>
+                <div class="uk-margin"><label class="uk-form-label">Observações</label><textarea class="uk-textarea" rows="2" id="new-user-notes" placeholder="Anotações sobre o usuário..."></textarea></div>
+                <div class="uk-margin uk-text-right">
+                    <button class="uk-button uk-button-default uk-modal-close" type="button">Cancelar</button>
+                    <button class="uk-button uk-button-primary" type="submit"><span uk-icon="icon: check"></span> Salvar Usuário</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="modal-edit-user" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title"><span uk-icon="icon: pencil"></span> Editar Usuário</h2>
+            <form id="form-edit-user" onsubmit="updateUser(event)">
+                <input type="hidden" id="edit-user-id">
+                <div class="uk-margin"><label class="uk-form-label">Nome *</label><input class="uk-input" type="text" id="edit-user-name" required></div>
+                <div class="uk-margin"><label class="uk-form-label">Número WhatsApp *</label><input class="uk-input" type="text" id="edit-user-number" required></div>
+                <div class="uk-margin"><label class="uk-form-label">Email</label><input class="uk-input" type="email" id="edit-user-email"></div>
+                <div class="uk-margin"><label class="uk-form-label">Grupo</label><select class="uk-select" id="edit-user-group"><option value="">Sem grupo</option></select></div>
+                <div class="uk-margin"><label class="uk-form-label">Observações</label><textarea class="uk-textarea" rows="2" id="edit-user-notes"></textarea></div>
+                <div class="uk-margin"><label class="uk-form-label">Status</label><select class="uk-select" id="edit-user-status"><option value="active">Ativo</option><option value="inactive">Inativo</option></select></div>
+                <div class="uk-margin uk-text-right">
+                    <button class="uk-button uk-button-default uk-modal-close" type="button">Cancelar</button>
+                    <button class="uk-button uk-button-primary" type="submit"><span uk-icon="icon: check"></span> Salvar Alterações</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="modal-import-users" uk-modal>
+        <div class="uk-modal-dialog uk-modal-body">
+            <button class="uk-modal-close-default" type="button" uk-close></button>
+            <h2 class="uk-modal-title"><span uk-icon="icon: upload"></span> Importar Usuários</h2>
+            <form id="form-import-users" onsubmit="importUsers(event)">
+                <p class="uk-text-muted">Cole a lista de números (um por linha) ou faça upload de um arquivo CSV.</p>
+                <div class="uk-margin"><label class="uk-form-label">Lista de Números</label><textarea class="uk-textarea" rows="8" id="import-users-list" placeholder="5511999999999&#10;5511888888888"></textarea></div>
+                <div class="uk-margin"><label class="uk-form-label">Ou faça upload de CSV:</label><div uk-form-custom="target: true"><input type="file" id="import-users-file" accept=".csv,.txt"><input class="uk-input uk-form-width-medium" type="text" placeholder="Selecionar arquivo" disabled></div></div>
+                <div class="uk-margin"><label class="uk-form-label">Grupo (opcional)</label><select class="uk-select" id="import-users-group"><option value="">Sem grupo</option></select></div>
+                <div class="uk-margin uk-text-right">
+                    <button class="uk-button uk-button-default uk-modal-close" type="button">Cancelar</button>
+                    <button class="uk-button uk-button-primary" type="submit"><span uk-icon="icon: upload"></span> Importar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>

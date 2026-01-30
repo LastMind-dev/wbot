@@ -111,10 +111,16 @@ app.get('/', (req, res) => {
             <p>Status: <strong>Operacional</strong></p>
             <p>Instâncias Ativas: ${sessions.size}</p>
             <br>
-            <a href="/admin" style="background: #25D366; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Gerenciar Instâncias</a>
+            <a href="/dashboard.html" style="background: #4c3b94; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Dashboard Principal</a>
+            <a href="/admin" style="background: #25D366; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Instâncias</a>
             <a href="/grupos.html" style="background: #6f42c1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Grupos</a>
         </div>
     `);
+});
+
+// Dashboard Principal (Nova Interface UIkit)
+app.get('/dashboard', requireAuth, (req, res) => {
+    res.sendFile(__dirname + '/public/dashboard.html');
 });
 
 // Criar Nova Instância (API)
@@ -2144,8 +2150,8 @@ app.get('/api/group/info/:instance/:groupId', async(req, res) => {
                 id: chat.id._serialized,
                 name: chat.name,
                 description: chat.description,
-                owner: chat.owner ?.id ?._serialized,
-                participants: chat.participants ?.map(p => ({
+                owner: chat.owner ? .id ? ._serialized,
+                participants: chat.participants ? .map(p => ({
                     id: p.id._serialized,
                     isAdmin: p.isAdmin,
                     isSuperAdmin: p.isSuperAdmin
@@ -2524,7 +2530,7 @@ app.post('/api/local-groups/create', async(req, res) => {
         }
 
         const result = await session.client.createGroup(name, participantList);
-        const groupId = result.gid ?._serialized || result.gid;
+        const groupId = result.gid ? ._serialized || result.gid;
 
         // Salvar no banco local
         const [insertResult] = await pool.execute(
