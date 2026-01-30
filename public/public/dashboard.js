@@ -15,7 +15,15 @@ document.addEventListener('DOMContentLoaded', () => {
     initializeDashboard();
     setupNavigation();
     loadLocalData();
+    setupTestingEvents();
 });
+
+function setupTestingEvents() {
+    const testingInstanceSelect = document.getElementById('testing-instance-select');
+    if (testingInstanceSelect) {
+        testingInstanceSelect.addEventListener('change', updateTestingConnectionStatus);
+    }
+}
 
 async function initializeDashboard() {
     await loadInstances();
@@ -61,6 +69,7 @@ function showSection(sectionName) {
         }
     } else if (sectionName === 'testing') {
         populateInstanceSelects();
+        updateTestingConnectionStatus();
     } else if (sectionName === 'users') {
         loadUsers();
     }
@@ -867,14 +876,18 @@ async function sendTestMessage() {
         
         const data = await res.json();
         
-        if (data.success) {
+        // Check for success (different APIs return different formats)
+        const isSuccess = data.success || (data.message && data.message.sent) || data.messageId;
+        
+        if (isSuccess) {
             addTestToHistory(recipient, message, true);
             showNotification('Mensagem enviada com sucesso!', 'success');
             document.getElementById('test-message').value = '';
             updatePreview();
         } else {
-            addTestToHistory(recipient, message, false, data.error);
-            showNotification('Erro: ' + data.error, 'error');
+            const errorMsg = data.error || 'Erro desconhecido';
+            addTestToHistory(recipient, message, false, errorMsg);
+            showNotification('Erro: ' + errorMsg, 'error');
         }
     } catch (err) {
         addTestToHistory(recipient, message, false, err.message);
@@ -1034,6 +1047,28 @@ function populateInstanceSelects() {
     const groupsSelect = document.getElementById('groups-instance-select');
     if (groupsSelect && groupsSelect.value && groups.length === 0) {
         loadGroups();
+    }
+    
+    // Update testing connection status
+    updateTestingConnectionStatus();
+}
+
+function updateTestingConnectionStatus() {
+    const select = document.getElementById('testing-instance-select');
+    const statusSpan = document.getElementById('testing-connection-status');
+    if (!select || !statusSpan) return;
+    
+    const instanceId = select.value;
+    if (!instanceId) {
+        statusSpan.innerHTML = '<span class="uk-text-warning">⚠️ Selecione uma instância</span>';
+        return;
+    }
+    
+    const instance = instances.find(i => i.id === instanceId);
+    if (instance && instance.status === 'CONNECTED') {
+        statusSpan.innerHTML = '<span class="uk-text-success">✅ Conectado</span>';
+    } else {
+        statusSpan.innerHTML = '<span class="uk-text-danger">❌ Desconectado</span>';
     }
 }
 
