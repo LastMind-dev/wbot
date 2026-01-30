@@ -1602,9 +1602,11 @@ app.get('/api/instances', async(req, res) => {
             'SELECT id, name, sistema_php_url, webhook, phone_number, status as db_status, created_at, last_connection FROM instances ORDER BY created_at DESC'
         );
 
+        console.log('[API /api/instances] Raw DB result:', JSON.stringify(dbInstances, null, 2));
+
         const instanceList = dbInstances.map(inst => {
             const session = sessions.get(inst.id);
-            return {
+            const mapped = {
                 id: inst.id,
                 name: inst.name || 'Sem nome',
                 sistema_php_url: inst.sistema_php_url,
@@ -1616,6 +1618,8 @@ app.get('/api/instances', async(req, res) => {
                 created_at: inst.created_at,
                 last_connection: inst.last_connection
             };
+            console.log('[API /api/instances] Mapped instance:', inst.id, '-> name:', mapped.name, ', phone:', mapped.phone_number, ', url:', mapped.sistema_php_url);
+            return mapped;
         });
 
         res.json({

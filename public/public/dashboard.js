@@ -113,11 +113,17 @@ function saveLocalData() {
 async function loadInstances() {
     try {
         // First try to load from database API (persistent)
-        const res = await fetch('/api/instances');
+        const res = await fetch('/api/instances?t=' + Date.now());
         const data = await res.json();
+
+        console.log('[DEBUG loadInstances] API Response:', JSON.stringify(data, null, 2));
 
         if (data.success && data.instances) {
             instances = data.instances;
+            console.log('[DEBUG loadInstances] Instances loaded:', instances.length);
+            if (instances.length > 0) {
+                console.log('[DEBUG loadInstances] First instance:', JSON.stringify(instances[0], null, 2));
+            }
             renderInstancesTable();
             renderFullInstancesTable();
             populateInstanceSelects();
