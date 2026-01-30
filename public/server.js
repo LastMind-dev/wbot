@@ -579,6 +579,29 @@ async function initDB() {
         pool = mysql.createPool(dbConfig);
         console.log('Database pool created');
 
+        // 0. Criar tabela de instâncias se não existir
+        await pool.execute(`
+            CREATE TABLE IF NOT EXISTS instances (
+                id VARCHAR(255) PRIMARY KEY,
+                name VARCHAR(255),
+                sistema_php_url VARCHAR(500),
+                webhook VARCHAR(500),
+                api_token VARCHAR(255),
+                phone_number VARCHAR(50),
+                status INT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_connection TIMESTAMP NULL
+            )
+        `);
+
+        // Garantir que a coluna name existe (para tabelas antigas)
+        try {
+            await pool.execute(`ALTER TABLE instances ADD COLUMN name VARCHAR(255) AFTER id`);
+            console.log('Column "name" added to instances table');
+        } catch (e) {
+            // Coluna já existe, ignorar erro
+        }
+
         // 1. Criar tabela de usuários se não existir
         await pool.execute(`
             CREATE TABLE IF NOT EXISTS users (
@@ -724,7 +747,7 @@ async function startSession(instanceId) {
             clearInterval(session.connectionMonitorInterval);
         }
 
-        // Ping a cada 20 segundos para manter conexão ativa (reduzido de 30s)
+        // Ping a cada 15 segundos para manter conexão ativa (mais agressivo)
         session.keepAliveInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
             if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
@@ -785,9 +808,9 @@ async function startSession(instanceId) {
                     }
                 }
             }
-        }, 20000); // 20 segundos (reduzido de 30s)
+        }, 15000); // 15 segundos (mais agressivo)
 
-        // Monitor de conexão adicional - verifica WebSocket a cada 45 segundos
+        // Monitor de conexão adicional - verifica WebSocket a cada 30 segundos
         session.connectionMonitorInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
             if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
@@ -2940,18 +2963,18 @@ async function deepHealthCheck() {
 }
 
 function startHealthCheck() {
-    // Health check a cada 45 segundos (reduzido de 1 minuto)
+    // Health check a cada 30 segundos (mais agressivo)
     healthCheckInterval = setInterval(async() => {
         await healthCheck();
         await checkMissingInstances();
-    }, 45000); // 45 segundos
+    }, 30000); // 30 segundos
 
-    // Deep health check a cada 5 minutos
+    // Deep health check a cada 2 minutos (mais frequente)
     deepHealthCheckInterval = setInterval(async() => {
         await deepHealthCheck();
-    }, 300000); // 5 minutos
+    }, 120000); // 2 minutos
 
-    console.log('[HealthCheck] 🏥 Sistema de monitoramento iniciado (intervalo: 45s, deep: 5min)');
+    console.log('[HealthCheck] 🏥 Sistema de monitoramento iniciado (intervalo: 30s, deep: 2min)');
 }
 
 function stopHealthCheck() {

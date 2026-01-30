@@ -229,8 +229,8 @@ function renderFullInstancesTable() {
             <tr>
                 <td><strong>${escapeHtml(inst.name || 'Sem nome')}</strong></td>
                 <td><code style="font-size: 0.75rem;">${inst.id.substring(0, 12)}...</code></td>
-                <td>${inst.phone || '---'}</td>
-                <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${inst.phpUrl || '---'}</td>
+                <td>${inst.phone_number || inst.phone || '---'}</td>
+                <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${inst.sistema_php_url || inst.phpUrl || '---'}</td>
                 <td><span class="status-badge ${statusClass}">${inst.status}</span></td>
                 <td class="uk-text-right">
                     <button class="uk-button uk-button-small uk-button-secondary action-btn" onclick="showInstanceInfo('${inst.id}')" title="Informações API"><span uk-icon="icon: info; ratio: 0.8"></span></button>
