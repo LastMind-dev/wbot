@@ -41,19 +41,24 @@ function showSection(sectionName) {
     document.querySelectorAll('.sidebar-nav a').forEach(link => {
         link.classList.remove('active');
     });
-    
+
     const targetSection = document.getElementById(`section-${sectionName}`);
     if (targetSection) {
         targetSection.classList.add('active');
     }
-    
+
     const targetLink = document.querySelector(`.sidebar-nav a[data-section="${sectionName}"]`);
     if (targetLink) {
         targetLink.classList.add('active');
     }
-    
+
     if (sectionName === 'groups') {
         populateInstanceSelects();
+        // Force load groups if instance is selected
+        const groupsSelect = document.getElementById('groups-instance-select');
+        if (groupsSelect && groupsSelect.value) {
+            loadGroups();
+        }
     } else if (sectionName === 'testing') {
         populateInstanceSelects();
     } else if (sectionName === 'users') {
@@ -74,13 +79,13 @@ function loadLocalData() {
         users = JSON.parse(savedUsers);
         renderUsersTable();
     }
-    
+
     const savedHistory = localStorage.getItem('wbot_test_history');
     if (savedHistory) {
         testHistory = JSON.parse(savedHistory);
         renderTestHistory();
     }
-    
+
     const savedMessageHistory = localStorage.getItem('wbot_message_history');
     if (savedMessageHistory) {
         messageHistory = JSON.parse(savedMessageHistory);
@@ -100,7 +105,7 @@ async function loadInstances() {
     try {
         const res = await fetch('/api/health');
         const data = await res.json();
-        
+
         if (data.sessions && data.sessions.list) {
             instances = data.sessions.list;
             renderInstancesTable();
@@ -117,7 +122,7 @@ async function loadSystemHealth() {
     try {
         const res = await fetch('/api/health');
         const data = await res.json();
-        
+
         if (data.memory) {
             document.getElementById('info-memory').textContent = formatBytes(data.memory.heapUsed);
         }
@@ -138,14 +143,14 @@ async function loadGroups() {
         document.getElementById('groups-list').innerHTML = '<div class="empty-state"><span uk-icon="icon: users; ratio: 3"></span><p>Selecione uma instância para ver os grupos</p></div>';
         return;
     }
-    
+
     currentInstance = instanceId;
     document.getElementById('groups-list').innerHTML = '<div class="uk-text-center uk-padding"><div uk-spinner></div><p>Carregando grupos...</p></div>';
-    
+
     try {
         const res = await fetch(`/api/group/list/${instanceId}`);
         const data = await res.json();
-        
+
         if (data.success) {
             groups = data.groups;
             document.getElementById('groups-count').textContent = data.count;
@@ -165,15 +170,15 @@ async function loadGroups() {
 // ========================================
 function renderInstancesTable() {
     const tbody = document.getElementById('instances-table-body');
-    
+
     if (instances.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="uk-text-center uk-text-muted">Nenhuma instância encontrada</td></tr>';
         return;
     }
-    
+
     tbody.innerHTML = instances.slice(0, 5).map(inst => {
-        const statusClass = getStatusClass(inst.status);
-        return `
+                const statusClass = getStatusClass(inst.status);
+                return `
             <tr>
                 <td><strong>${escapeHtml(inst.name || inst.id.substring(0, 8))}</strong></td>
                 <td>${inst.phone || '---'}</td>
@@ -998,6 +1003,9 @@ function populateInstanceSelects() {
         document.getElementById('testing-instance-select')
     ];
     
+    // Find first connected instance
+    const connectedInstance = instances.find(inst => inst.status === 'CONNECTED');
+    
     selects.forEach(select => {
         if (!select) return;
         const currentValue = select.value;
@@ -1013,8 +1021,20 @@ function populateInstanceSelects() {
             select.appendChild(option);
         });
         
-        if (currentValue) select.value = currentValue;
+        // Auto-select: keep current value, or select connected instance
+        if (currentValue) {
+            select.value = currentValue;
+        } else if (connectedInstance && !select.value) {
+            select.value = connectedInstance.id;
+            currentInstance = connectedInstance.id;
+        }
     });
+    
+    // Auto-load groups if we have a connected instance selected
+    const groupsSelect = document.getElementById('groups-instance-select');
+    if (groupsSelect && groupsSelect.value && groups.length === 0) {
+        loadGroups();
+    }
 }
 
 function populateGroupSelect() {
