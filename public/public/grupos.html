@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerenciador de Grupos WhatsApp</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        h1 { 
+            color: white; 
+            text-align: center; 
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .header-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        
+        .instance-selector {
+            background: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .instance-selector select {
+            padding: 8px 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary { background: #25D366; color: white; }
+        .btn-primary:hover { background: #1da851; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover { background: #5a6268; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-info { background: #17a2b8; color: white; }
+        .btn-info:hover { background: #138496; }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .card-header {
+            background: #4c3b94;
+            color: white;
+            padding: 15px 20px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .card-body { padding: 20px; }
+        
+        .form-group { margin-bottom: 15px; }
+        .form-group label { 
+            display: block; 
+            margin-bottom: 5px; 
+            font-weight: 600;
+            color: #333;
+        }
+        .form-control {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        .form-control:focus {
+            outline: none;
+            border-color: #25D366;
+        }
+        
+        textarea.form-control { min-height: 80px; resize: vertical; }
+        
+        .group-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .group-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+        }
+        
+        .group-item:hover { background: #f8f9fa; }
+        
+        .group-info h4 { margin-bottom: 5px; color: #333; }
+        .group-info small { color: #666; }
+        
+        .group-actions { display: flex; gap: 5px; }
+        .group-actions .btn { padding: 5px 10px; font-size: 12px; }
+        
+        .member-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #eee;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        
+        .member-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .member-item:last-child { border-bottom: none; }
+        
+        .badge {
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        
+        .badge-success { background: #d4edda; color: #155724; }
+        .badge-info { background: #d1ecf1; color: #0c5460; }
+        
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        .modal {
+            background: white;
+            border-radius: 10px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            background: #4c3b94;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-body { padding: 20px; }
+        
+        .modal-footer {
+            padding: 15px 20px;
+            border-top: 1px solid #eee;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+        
+        .close-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        
+        .alert {
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+        
+        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #eee;
+            margin-bottom: 20px;
+        }
+        
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.3s;
+        }
+        
+        .tab.active {
+            border-bottom-color: #25D366;
+            color: #25D366;
+            font-weight: bold;
+        }
+        
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        @media (max-width: 768px) {
+            .grid { grid-template-columns: 1fr; }
+            .header-actions { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📱 Gerenciador de Grupos WhatsApp</h1>
+        
+        <div class="header-actions">
+            <div class="instance-selector">
+                <label>Instância:</label>
+                <select id="instanceSelect" onchange="loadGroups()">
+                    <option value="">Carregando...</option>
+                </select>
+                <span id="connectionStatus"></span>
+            </div>
+            <div>
+                <button class="btn btn-primary" onclick="openCreateGroupModal()">+ Novo Grupo</button>
+                <button class="btn btn-secondary" onclick="loadGroups()">🔄 Atualizar</button>
+                <a href="/admin" class="btn btn-info">← Voltar</a>
+            </div>
+        </div>
+        
+        <div id="alertContainer"></div>
+        
+        <div class="grid">
+            <!-- Lista de Grupos do WhatsApp -->
+            <div class="card">
+                <div class="card-header">
+                    <span>📋 Grupos do WhatsApp</span>
+                    <span id="groupCount" class="badge badge-info">0</span>
+                </div>
+                <div class="card-body">
+                    <div id="groupList" class="group-list">
+                        <div class="loading">Selecione uma instância...</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Detalhes do Grupo Selecionado -->
+            <div class="card">
+                <div class="card-header">
+                    <span>👥 Detalhes do Grupo</span>
+                </div>
+                <div class="card-body">
+                    <div id="groupDetails">
+                        <p style="text-align: center; color: #666;">Selecione um grupo para ver os detalhes</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Card de Envio de Mensagem -->
+        <div class="card" style="margin-top: 20px;">
+            <div class="card-header">
+                <span>✉️ Enviar Mensagem para Grupo</span>
+            </div>
+            <div class="card-body">
+                <div class="form-group">
+                    <label>Grupo Selecionado:</label>
+                    <input type="text" id="selectedGroupName" class="form-control" readonly placeholder="Selecione um grupo acima">
+                    <input type="hidden" id="selectedGroupId">
+                </div>
+                <div class="form-group">
+                    <label>Mensagem:</label>
+                    <textarea id="groupMessage" class="form-control" placeholder="Digite sua mensagem..."></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="sendGroupMessage()">Enviar Mensagem</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modal Criar Grupo -->
+    <div id="createGroupModal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Criar Novo Grupo</h3>
+                <button class="close-btn" onclick="closeModal('createGroupModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Nome do Grupo *</label>
+                    <input type="text" id="newGroupName" class="form-control" placeholder="Ex: Clientes VIP">
+                </div>
+                <div class="form-group">
+                    <label>Descrição</label>
+                    <textarea id="newGroupDescription" class="form-control" placeholder="Descrição do grupo (opcional)"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Participantes (um número por linha, com DDI)</label>
+                    <textarea id="newGroupParticipants" class="form-control" placeholder="5511999999999&#10;5511888888888&#10;5511777777777"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('createGroupModal')">Cancelar</button>
+                <button class="btn btn-primary" onclick="createGroup()">Criar Grupo</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modal Adicionar Participantes -->
+    <div id="addParticipantsModal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Adicionar Participantes</h3>
+                <button class="close-btn" onclick="closeModal('addParticipantsModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Grupo:</label>
+                    <input type="text" id="addToGroupName" class="form-control" readonly>
+                    <input type="hidden" id="addToGroupId">
+                </div>
+                <div class="form-group">
+                    <label>Números (um por linha, com DDI)</label>
+                    <textarea id="participantsToAdd" class="form-control" placeholder="5511999999999&#10;5511888888888"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('addParticipantsModal')">Cancelar</button>
+                <button class="btn btn-primary" onclick="addParticipants()">Adicionar</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentInstance = '';
+        let groups = [];
+        
+        // Carregar instâncias ao iniciar
+        document.addEventListener('DOMContentLoaded', loadInstances);
+        
+        async function loadInstances() {
+            try {
+                const res = await fetch('/api/health');
+                const data = await res.json();
+                
+                const select = document.getElementById('instanceSelect');
+                select.innerHTML = '<option value="">Selecione uma instância</option>';
+                
+                if (data.sessions && data.sessions.list) {
+                    data.sessions.list.forEach(session => {
+                        const option = document.createElement('option');
+                        option.value = session.id;
+                        option.textContent = `${session.id.substring(0, 8)}... (${session.status})`;
+                        if (session.status === 'CONNECTED') {
+                            option.textContent += ' ✅';
+                        }
+                        select.appendChild(option);
+                    });
+                }
+            } catch (err) {
+                showAlert('Erro ao carregar instâncias: ' + err.message, 'error');
+            }
+        }
+        
+        async function loadGroups() {
+            const instance = document.getElementById('instanceSelect').value;
+            if (!instance) {
+                document.getElementById('groupList').innerHTML = '<div class="loading">Selecione uma instância...</div>';
+                return;
+            }
+            
+            currentInstance = instance;
+            document.getElementById('groupList').innerHTML = '<div class="loading">Carregando grupos...</div>';
+            
+            try {
+                const res = await fetch(`/api/group/list/${instance}`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    groups = data.groups;
+                    document.getElementById('groupCount').textContent = data.count;
+                    renderGroups();
+                } else {
+                    document.getElementById('groupList').innerHTML = `<div class="loading">Erro: ${data.error}</div>`;
+                }
+            } catch (err) {
+                document.getElementById('groupList').innerHTML = `<div class="loading">Erro: ${err.message}</div>`;
+            }
+        }
+        
+        function renderGroups() {
+            const container = document.getElementById('groupList');
+            
+            if (groups.length === 0) {
+                container.innerHTML = '<div class="loading">Nenhum grupo encontrado</div>';
+                return;
+            }
+            
+            container.innerHTML = groups.map(g => `
+                <div class="group-item" onclick="selectGroup('${g.id}', '${escapeHtml(g.name)}')">
+                    <div class="group-info">
+                        <h4>${escapeHtml(g.name)}</h4>
+                        <small>${g.participantsCount || 0} participantes</small>
+                    </div>
+                    <div class="group-actions">
+                        <button class="btn btn-info" onclick="event.stopPropagation(); viewGroupInfo('${g.id}')" title="Ver detalhes">👁️</button>
+                        <button class="btn btn-primary" onclick="event.stopPropagation(); openAddParticipantsModal('${g.id}', '${escapeHtml(g.name)}')" title="Adicionar membros">➕</button>
+                        <button class="btn btn-secondary" onclick="event.stopPropagation(); getInviteLink('${g.id}')" title="Link de convite">🔗</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function selectGroup(groupId, groupName) {
+            document.getElementById('selectedGroupId').value = groupId;
+            document.getElementById('selectedGroupName').value = groupName;
+            viewGroupInfo(groupId);
+        }
+        
+        async function viewGroupInfo(groupId) {
+            const container = document.getElementById('groupDetails');
+            container.innerHTML = '<div class="loading">Carregando...</div>';
+            
+            try {
+                const res = await fetch(`/api/group/info/${currentInstance}/${encodeURIComponent(groupId)}`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    const g = data.group;
+                    container.innerHTML = `
+                        <h3>${escapeHtml(g.name)}</h3>
+                        <p><strong>ID:</strong> ${g.id}</p>
+                        <p><strong>Descrição:</strong> ${escapeHtml(g.description || 'Sem descrição')}</p>
+                        <p><strong>Criado em:</strong> ${g.createdAt ? new Date(g.createdAt * 1000).toLocaleString() : 'N/A'}</p>
+                        <p><strong>Participantes:</strong> ${g.participants?.length || 0}</p>
+                        
+                        <div class="member-list">
+                            ${(g.participants || []).map(p => `
+                                <div class="member-item">
+                                    <span>${p.id.replace('@c.us', '')}</span>
+                                    ${p.isAdmin ? '<span class="badge badge-success">Admin</span>' : ''}
+                                    ${p.isSuperAdmin ? '<span class="badge badge-info">Super Admin</span>' : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    `;
+                } else {
+                    container.innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+                }
+            } catch (err) {
+                container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            }
+        }
+        
+        function openCreateGroupModal() {
+            if (!currentInstance) {
+                showAlert('Selecione uma instância primeiro', 'error');
+                return;
+            }
+            document.getElementById('createGroupModal').style.display = 'flex';
+        }
+        
+        function openAddParticipantsModal(groupId, groupName) {
+            document.getElementById('addToGroupId').value = groupId;
+            document.getElementById('addToGroupName').value = groupName;
+            document.getElementById('addParticipantsModal').style.display = 'flex';
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+        
+        async function createGroup() {
+            const name = document.getElementById('newGroupName').value.trim();
+            const description = document.getElementById('newGroupDescription').value.trim();
+            const participantsText = document.getElementById('newGroupParticipants').value.trim();
+            
+            if (!name) {
+                showAlert('Nome do grupo é obrigatório', 'error');
+                return;
+            }
+            
+            const participants = participantsText
+                .split('\n')
+                .map(p => p.trim())
+                .filter(p => p.length > 0);
+            
+            try {
+                const res = await fetch('/api/group/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        instance: currentInstance,
+                        name,
+                        description,
+                        participants
+                    })
+                });
+                
+                const data = await res.json();
+                
+                if (data.success) {
+                    showAlert('Grupo criado com sucesso!', 'success');
+                    closeModal('createGroupModal');
+                    document.getElementById('newGroupName').value = '';
+                    document.getElementById('newGroupDescription').value = '';
+                    document.getElementById('newGroupParticipants').value = '';
+                    loadGroups();
+                } else {
+                    showAlert('Erro: ' + data.error, 'error');
+                }
+            } catch (err) {
+                showAlert('Erro: ' + err.message, 'error');
+            }
+        }
+        
+        async function addParticipants() {
+            const groupId = document.getElementById('addToGroupId').value;
+            const participantsText = document.getElementById('participantsToAdd').value.trim();
+            
+            const participants = participantsText
+                .split('\n')
+                .map(p => p.trim())
+                .filter(p => p.length > 0);
+            
+            if (participants.length === 0) {
+                showAlert('Adicione pelo menos um número', 'error');
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/group/add-participants', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        instance: currentInstance,
+                        groupId,
+                        participants
+                    })
+                });
+                
+                const data = await res.json();
+                
+                if (data.success) {
+                    showAlert('Participantes processados!', 'success');
+                    closeModal('addParticipantsModal');
+                    document.getElementById('participantsToAdd').value = '';
+                    viewGroupInfo(groupId);
+                } else {
+                    showAlert('Erro: ' + data.error, 'error');
+                }
+            } catch (err) {
+                showAlert('Erro: ' + err.message, 'error');
+            }
+        }
+        
+        async function sendGroupMessage() {
+            const groupId = document.getElementById('selectedGroupId').value;
+            const message = document.getElementById('groupMessage').value.trim();
+            
+            if (!groupId) {
+                showAlert('Selecione um grupo primeiro', 'error');
+                return;
+            }
+            
+            if (!message) {
+                showAlert('Digite uma mensagem', 'error');
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/group/send-message', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        instance: currentInstance,
+                        groupId,
+                        message
+                    })
+                });
+                
+                const data = await res.json();
+                
+                if (data.success) {
+                    showAlert('Mensagem enviada com sucesso!', 'success');
+                    document.getElementById('groupMessage').value = '';
+                } else {
+                    showAlert('Erro: ' + data.error, 'error');
+                }
+            } catch (err) {
+                showAlert('Erro: ' + err.message, 'error');
+            }
+        }
+        
+        async function getInviteLink(groupId) {
+            try {
+                const res = await fetch(`/api/group/invite-link/${currentInstance}/${encodeURIComponent(groupId)}`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    const link = data.inviteLink;
+                    
+                    // Copiar para clipboard
+                    navigator.clipboard.writeText(link).then(() => {
+                        showAlert(`Link copiado: ${link}`, 'success');
+                    }).catch(() => {
+                        prompt('Link de convite:', link);
+                    });
+                } else {
+                    showAlert('Erro: ' + data.error, 'error');
+                }
+            } catch (err) {
+                showAlert('Erro: ' + err.message, 'error');
+            }
+        }
+        
+        function showAlert(message, type) {
+            const container = document.getElementById('alertContainer');
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            container.appendChild(alert);
+            
+            setTimeout(() => alert.remove(), 5000);
+        }
+        
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
