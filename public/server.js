@@ -19,29 +19,34 @@ require('dotenv').config();
 // ========================================
 const CONNECTION_CONFIG = {
     // Intervalos de verificação (em ms)
-    HEARTBEAT_INTERVAL: 10000, // Ping a cada 10 segundos (MUITO agressivo)
-    WEBSOCKET_CHECK_INTERVAL: 20000, // Verificar WebSocket a cada 20s
-    PRESENCE_UPDATE_INTERVAL: 30000, // Atualizar presença a cada 30s
-    HEALTH_CHECK_INTERVAL: 25000, // Health check a cada 25s
-    DEEP_HEALTH_CHECK_INTERVAL: 90000, // Deep check a cada 1.5 min
+    HEARTBEAT_INTERVAL: 15000, // Ping a cada 15 segundos (balanceado)
+    WEBSOCKET_CHECK_INTERVAL: 30000, // Verificar WebSocket a cada 30s
+    PRESENCE_UPDATE_INTERVAL: 45000, // Atualizar presença a cada 45s
+    HEALTH_CHECK_INTERVAL: 30000, // Health check a cada 30s
+    DEEP_HEALTH_CHECK_INTERVAL: 120000, // Deep check a cada 2 min
 
     // Timeouts
-    STATE_CHECK_TIMEOUT: 10000, // Timeout para verificar estado
-    DESTROY_TIMEOUT: 8000, // Timeout para destruir cliente
-    INIT_TIMEOUT: 150000, // 2.5 min para inicialização
+    STATE_CHECK_TIMEOUT: 15000, // Timeout para verificar estado (aumentado)
+    DESTROY_TIMEOUT: 10000, // Timeout para destruir cliente
+    INIT_TIMEOUT: 180000, // 3 min para inicialização
 
     // Limites de reconexão
-    MAX_RECONNECT_ATTEMPTS: 15, // Máximo de tentativas
-    MAX_CONSECUTIVE_FAILURES: 2, // Falhas antes de reconectar
+    MAX_RECONNECT_ATTEMPTS: 20, // Máximo de tentativas (aumentado)
+    MAX_CONSECUTIVE_FAILURES: 3, // Falhas antes de reconectar (aumentado)
 
     // Delays
-    RECONNECT_BASE_DELAY: 3000, // Delay base para reconexão
-    RECONNECT_MAX_DELAY: 180000, // Máximo 3 minutos de delay
+    RECONNECT_BASE_DELAY: 5000, // Delay base para reconexão (aumentado)
+    RECONNECT_MAX_DELAY: 300000, // Máximo 5 minutos de delay
 
     // Thresholds
-    INACTIVITY_THRESHOLD: 120000, // 2 minutos sem atividade = problema
-    LOADING_TIMEOUT: 90000, // 1.5 min máximo em loading
-    PING_TIMEOUT_THRESHOLD: 60000, // 1 min sem ping = problema
+    INACTIVITY_THRESHOLD: 180000, // 3 minutos sem atividade = problema
+    LOADING_TIMEOUT: 120000, // 2 min máximo em loading
+    PING_TIMEOUT_THRESHOLD: 90000, // 1.5 min sem ping = problema
+
+    // NOVOS: Proteção contra erros de contexto
+    CONTEXT_ERROR_COOLDOWN: 5000, // Espera após erro de contexto
+    MAX_CONTEXT_ERRORS: 3, // Máximo de erros de contexto antes de reconectar
+    PAGE_NAVIGATION_DELAY: 3000, // Delay após navegação detectada
 };
 
 // ========================================
@@ -813,13 +818,16 @@ async function startSession(instanceId) {
         console.log(`[${instanceId}] 💡 Iniciando sistema ULTRA-ROBUSTO de manutenção de conexão...`);
 
         // ========================================
-        // 1. HEARTBEAT ULTRA-AGRESSIVO (10 segundos)
+        // 1. HEARTBEAT COM PROTEÇÃO DE CONTEXTO
         // ========================================
         session.keepAliveInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
             if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
                 return;
             }
+
+            // Evitar operações durante reconexão
+            if (currentSession.isReconnecting) return;
 
             try {
                 // Verificar browser e página
@@ -828,17 +836,17 @@ async function startSession(instanceId) {
 
                 if (!browserOk) {
                     console.log(`[${instanceId}] 🔴 HEARTBEAT: Browser morto!`);
-                    await triggerReconnection(instanceId, 'BROWSER_DEAD');
+                    await handleConnectionLoss(instanceId, 'BROWSER_DEAD');
                     return;
                 }
 
                 if (!pageOk) {
                     console.log(`[${instanceId}] 🔴 HEARTBEAT: Página fechada!`);
-                    await triggerReconnection(instanceId, 'PAGE_CLOSED');
+                    await handleConnectionLoss(instanceId, 'PAGE_CLOSED');
                     return;
                 }
 
-                // Ping com timeout curto
+                // Ping com timeout e proteção contra erros de contexto
                 const state = await Promise.race([
                     currentSession.client.getState(),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), CONNECTION_CONFIG.STATE_CHECK_TIMEOUT))
@@ -848,6 +856,7 @@ async function startSession(instanceId) {
                 currentSession.lastPing = Date.now();
                 currentSession.consecutiveFailures = 0;
                 currentSession.lastSuccessfulPing = Date.now();
+                currentSession.contextErrors = 0; // Reset erros de contexto
 
                 if (state === 'CONFLICT') {
                     console.log(`[${instanceId}] ⚠️ HEARTBEAT: Conflito - executando takeover...`);
@@ -857,190 +866,108 @@ async function startSession(instanceId) {
                     currentSession.consecutiveFailures++;
                 }
             } catch (err) {
-                console.error(`[${instanceId}] 🔴 HEARTBEAT Falhou:`, err.message);
                 const currentSession = sessions.get(instanceId);
-                if (currentSession) {
-                    currentSession.consecutiveFailures = (currentSession.consecutiveFailures || 0) + 1;
+                if (!currentSession) return;
 
-                    if (currentSession.consecutiveFailures >= CONNECTION_CONFIG.MAX_CONSECUTIVE_FAILURES) {
-                        console.log(`[${instanceId}] 🔴 ${currentSession.consecutiveFailures} falhas consecutivas - RECONECTANDO!`);
-                        await triggerReconnection(instanceId, 'CONSECUTIVE_HEARTBEAT_FAILURES');
+                // PROTEÇÃO: Detectar erros de contexto destruído
+                const isContextError = err.message.includes('context') ||
+                    err.message.includes('destroyed') ||
+                    err.message.includes('navigation') ||
+                    err.message.includes('Target closed');
+
+                if (isContextError) {
+                    currentSession.contextErrors = (currentSession.contextErrors || 0) + 1;
+                    console.log(`[${instanceId}] ⚠️ HEARTBEAT: Erro de contexto (${currentSession.contextErrors}/${CONNECTION_CONFIG.MAX_CONTEXT_ERRORS})`);
+
+                    if (currentSession.contextErrors >= CONNECTION_CONFIG.MAX_CONTEXT_ERRORS) {
+                        console.log(`[${instanceId}] 🔴 Muitos erros de contexto - RECONECTANDO!`);
+                        await handleConnectionLoss(instanceId, 'CONTEXT_ERRORS');
                     }
+                    return; // Não contar como falha consecutiva normal
+                }
+
+                console.error(`[${instanceId}] 🔴 HEARTBEAT Falhou:`, err.message);
+                currentSession.consecutiveFailures = (currentSession.consecutiveFailures || 0) + 1;
+
+                if (currentSession.consecutiveFailures >= CONNECTION_CONFIG.MAX_CONSECUTIVE_FAILURES) {
+                    console.log(`[${instanceId}] 🔴 ${currentSession.consecutiveFailures} falhas consecutivas - RECONECTANDO!`);
+                    await handleConnectionLoss(instanceId, 'CONSECUTIVE_HEARTBEAT_FAILURES');
                 }
             }
         }, CONNECTION_CONFIG.HEARTBEAT_INTERVAL);
 
         // ========================================
-        // 2. VERIFICADOR DE WEBSOCKET REAL (20 segundos)
+        // 2. VERIFICADOR DE WEBSOCKET SIMPLES
         // ========================================
         session.websocketCheckInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
             if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
                 return;
             }
+            if (currentSession.isReconnecting) return;
 
             try {
-                // Verificar estado REAL do WebSocket interno do WhatsApp
+                if (!currentSession.client.pupPage || currentSession.client.pupPage.isClosed()) {
+                    return;
+                }
+
                 const wsStatus = await Promise.race([
                     currentSession.client.pupPage.evaluate(() => {
                         try {
-                            // Verificações múltiplas do estado da conexão
-                            const checks = {
+                            return {
                                 storeExists: typeof window.Store !== 'undefined',
-                                socketExists: window.Store && typeof window.Store.Socket !== 'undefined',
                                 socketState: window.Store && window.Store.Socket ? window.Store.Socket.state : null,
-                                streamExists: window.Store && typeof window.Store.Stream !== 'undefined',
-                                streamState: window.Store && window.Store.Stream ? window.Store.Stream.displayInfo : null,
-                                connExists: window.Store && typeof window.Store.Conn !== 'undefined',
                                 isOnline: navigator.onLine
                             };
-                            return checks;
                         } catch (e) {
                             return { error: e.message };
                         }
                     }),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('WS_CHECK_TIMEOUT')), 8000))
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('WS_TIMEOUT')), 10000))
                 ]);
 
-                if (wsStatus.error) {
-                    console.log(`[${instanceId}] ⚠️ WS-CHECK: Erro interno - ${wsStatus.error}`);
-                    currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
-                } else if (wsStatus.socketState !== 'CONNECTED') {
-                    console.log(`[${instanceId}] 🔴 WS-CHECK: WebSocket estado = ${wsStatus.socketState}`);
-                    currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
-                } else if (!wsStatus.isOnline) {
-                    console.log(`[${instanceId}] ⚠️ WS-CHECK: Browser reporta offline`);
-                } else {
-                    // Tudo OK
+                if (wsStatus.socketState === 'CONNECTED') {
                     currentSession.wsCheckFailures = 0;
                     currentSession.lastWsCheck = Date.now();
+                } else if (wsStatus.socketState) {
+                    console.log(`[${instanceId}] ⚠️ WS-CHECK: Estado = ${wsStatus.socketState}`);
+                    currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
                 }
 
-                // Se falhar 3 vezes, forçar reconexão
-                if ((currentSession.wsCheckFailures || 0) >= 3) {
-                    console.log(`[${instanceId}] 🔴 WS-CHECK: 3 falhas - WebSocket morto! Reconectando...`);
-                    await triggerReconnection(instanceId, 'WEBSOCKET_DEAD');
+                if ((currentSession.wsCheckFailures || 0) >= 4) {
+                    console.log(`[${instanceId}] 🔴 WS-CHECK: Muitas falhas - Reconectando...`);
+                    await handleConnectionLoss(instanceId, 'WEBSOCKET_DEAD');
                 }
             } catch (err) {
-                console.error(`[${instanceId}] 🔴 WS-CHECK Error:`, err.message);
-                const currentSession = sessions.get(instanceId);
-                if (currentSession) {
-                    currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
-                    if ((currentSession.wsCheckFailures || 0) >= 3) {
-                        await triggerReconnection(instanceId, 'WEBSOCKET_CHECK_FAILED');
+                // Ignorar erros de contexto
+                if (!err.message.includes('context') && !err.message.includes('destroyed')) {
+                    const currentSession = sessions.get(instanceId);
+                    if (currentSession) {
+                        currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
                     }
                 }
             }
         }, CONNECTION_CONFIG.WEBSOCKET_CHECK_INTERVAL);
 
         // ========================================
-        // 3. ATUALIZADOR DE PRESENÇA (30 segundos)
-        // Envia sinal de "online" para o WhatsApp
-        // ========================================
-        session.presenceInterval = setInterval(async() => {
-            const currentSession = sessions.get(instanceId);
-            if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
-                return;
-            }
-
-            try {
-                // Enviar presença "available" para manter conexão viva
-                await Promise.race([
-                    currentSession.client.pupPage.evaluate(() => {
-                        try {
-                            if (window.Store && window.Store.PresenceUtils) {
-                                window.Store.PresenceUtils.sendPresenceAvailable();
-                                return true;
-                            }
-                            return false;
-                        } catch (e) {
-                            return false;
-                        }
-                    }),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('PRESENCE_TIMEOUT')), 5000))
-                ]);
-
-                currentSession.lastPresenceUpdate = Date.now();
-            } catch (err) {
-                // Não é crítico, apenas logar
-                console.log(`[${instanceId}] ⚠️ Presença não enviada: ${err.message}`);
-            }
-        }, CONNECTION_CONFIG.PRESENCE_UPDATE_INTERVAL);
-
-        // ========================================
-        // 4. WATCHDOG DE INATIVIDADE (45 segundos)
-        // Detecta sessão "zumbi"
+        // 3. WATCHDOG DE INATIVIDADE
         // ========================================
         session.watchdogInterval = setInterval(async() => {
             const currentSession = sessions.get(instanceId);
-            if (!currentSession || currentSession.status !== 'CONNECTED') {
+            if (!currentSession || currentSession.status !== 'CONNECTED' || currentSession.isReconnecting) {
                 return;
             }
 
             const now = Date.now();
             const timeSinceLastPing = now - (currentSession.lastSuccessfulPing || now);
-            const timeSinceActivity = now - (currentSession.lastActivity || now);
 
-            // Se não teve ping bem-sucedido em 1 minuto
             if (timeSinceLastPing > CONNECTION_CONFIG.PING_TIMEOUT_THRESHOLD) {
-                console.log(`[${instanceId}] 🔴 WATCHDOG: Sem ping há ${Math.round(timeSinceLastPing/1000)}s - SESSÃO ZUMBI!`);
-                await triggerReconnection(instanceId, 'ZOMBIE_SESSION_NO_PING');
-                return;
+                console.log(`[${instanceId}] 🔴 WATCHDOG: Sem ping há ${Math.round(timeSinceLastPing/1000)}s`);
+                await handleConnectionLoss(instanceId, 'WATCHDOG_NO_PING');
             }
+        }, 60000);
 
-            // Se não teve atividade em 2 minutos, verificar profundamente
-            if (timeSinceActivity > CONNECTION_CONFIG.INACTIVITY_THRESHOLD) {
-                console.log(`[${instanceId}] ⚠️ WATCHDOG: Inativo há ${Math.round(timeSinceActivity/1000)}s - verificando...`);
-
-                try {
-                    // Tentar uma operação real
-                    const canOperate = await Promise.race([
-                        (async() => {
-                            const state = await currentSession.client.getState();
-                            return state === 'CONNECTED';
-                        })(),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('WATCHDOG_TIMEOUT')), 10000))
-                    ]);
-
-                    if (canOperate) {
-                        currentSession.lastActivity = Date.now();
-                        console.log(`[${instanceId}] ✅ WATCHDOG: Sessão ainda responde`);
-                    } else {
-                        console.log(`[${instanceId}] 🔴 WATCHDOG: Sessão não operacional!`);
-                        await triggerReconnection(instanceId, 'WATCHDOG_NOT_OPERATIONAL');
-                    }
-                } catch (err) {
-                    console.log(`[${instanceId}] 🔴 WATCHDOG: Sessão não responde - ${err.message}`);
-                    await triggerReconnection(instanceId, 'WATCHDOG_NO_RESPONSE');
-                }
-            }
-        }, 45000);
-
-        // ========================================
-        // 5. GARBAGE COLLECTOR FORÇADO (2 minutos)
-        // Previne memory leaks do Puppeteer
-        // ========================================
-        session.gcInterval = setInterval(async() => {
-            const currentSession = sessions.get(instanceId);
-            if (!currentSession || !currentSession.client || !currentSession.client.pupPage) {
-                return;
-            }
-
-            try {
-                // Forçar garbage collection no browser
-                await currentSession.client.pupPage.evaluate(() => {
-                    if (window.gc) window.gc();
-                });
-            } catch (err) {
-                // Ignorar erros de GC
-            }
-        }, 120000);
-
-        console.log(`[${instanceId}] ✅ Sistema de manutenção de conexão ATIVO:`);
-        console.log(`    - Heartbeat: ${CONNECTION_CONFIG.HEARTBEAT_INTERVAL/1000}s`);
-        console.log(`    - WebSocket Check: ${CONNECTION_CONFIG.WEBSOCKET_CHECK_INTERVAL/1000}s`);
-        console.log(`    - Presença: ${CONNECTION_CONFIG.PRESENCE_UPDATE_INTERVAL/1000}s`);
-        console.log(`    - Watchdog: 45s`);
+        console.log(`[${instanceId}] ✅ Sistema de manutenção de conexão ATIVO`);
     };
 
     // ========================================
@@ -1123,42 +1050,67 @@ async function startSession(instanceId) {
     };
 
     // ========================================
-    // FUNÇÃO DE TRATAMENTO DE PERDA DE CONEXÃO
+    // FUNÇÃO DE TRATAMENTO DE PERDA DE CONEXÃO (CORRIGIDA)
     // ========================================
     const handleConnectionLoss = async(instId, reason) => {
         const session = sessions.get(instId);
-        if (!session || session.isReconnecting) return;
+        if (!session) return;
+
+        // Prevenir múltiplas reconexões simultâneas
+        if (session.isReconnecting) {
+            console.log(`[${instId}] ⏳ Reconexão já em andamento, ignorando: ${reason}`);
+            return;
+        }
 
         session.isReconnecting = true;
         console.log(`[${instId}] 🔌 Perda de conexão detectada: ${reason}`);
 
-        // Limpar intervalos
-        if (session.keepAliveInterval) clearInterval(session.keepAliveInterval);
-        if (session.connectionMonitorInterval) clearInterval(session.connectionMonitorInterval);
+        // Limpar TODOS os intervalos (CORRIGIDO)
+        clearAllSessionIntervals(session);
 
-        // Tentar destruir cliente atual
+        // Tentar destruir cliente atual com proteção
         try {
             if (session.client) {
+                // Remover listeners para evitar eventos durante destruição
+                session.client.removeAllListeners();
+
                 await Promise.race([
                     session.client.destroy(),
-                    new Promise(resolve => setTimeout(resolve, 5000))
+                    new Promise(resolve => setTimeout(resolve, CONNECTION_CONFIG.DESTROY_TIMEOUT))
                 ]);
             }
         } catch (e) {
-            console.error(`[${instId}] Erro ao destruir cliente:`, e.message);
+            // Ignorar erros de contexto destruído
+            if (!e.message.includes('context') && !e.message.includes('destroyed')) {
+                console.error(`[${instId}] Erro ao destruir cliente:`, e.message);
+            }
         }
 
         sessions.delete(instId);
         await updateInstanceStatus(instId, 0);
 
-        // Reconectar após delay
-        const delay = 5000 + (Math.random() * 5000); // 5-10 segundos
-        console.log(`[${instId}] 🔄 Reconectando em ${Math.round(delay/1000)}s...`);
+        // Reconectar após delay com backoff
+        const reconnectAttempts = session.reconnectAttempts || 0;
+        const baseDelay = CONNECTION_CONFIG.RECONNECT_BASE_DELAY;
+        const delay = Math.min(baseDelay * Math.pow(1.5, reconnectAttempts), CONNECTION_CONFIG.RECONNECT_MAX_DELAY) + (Math.random() * 3000);
+
+        console.log(`[${instId}] 🔄 Reconectando em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1})...`);
 
         setTimeout(async() => {
             if (!sessions.has(instId)) {
                 try {
-                    await startSession(instId);
+                    const newSession = await startSession(instId);
+                    if (newSession) {
+                        newSession.reconnectAttempts = reconnectAttempts + 1;
+                        // Resetar contador após conexão bem-sucedida (30 min)
+                        setTimeout(() => {
+                            const s = sessions.get(instId);
+                            if (s && s.status === 'CONNECTED') {
+                                s.reconnectAttempts = 0;
+                                console.log(`[${instId}] ✅ Contador de reconexões resetado`);
+                            }
+                        }, 1800000);
+                    }
                 } catch (err) {
                     console.error(`[${instId}] Erro na reconexão:`, err.message);
                 }
@@ -1422,13 +1374,8 @@ async function startSession(instanceId) {
         let reconnectAttempts = 0;
 
         if (session) {
-            // Parar Keep-Alive e Monitor
-            if (session.keepAliveInterval) {
-                clearInterval(session.keepAliveInterval);
-            }
-            if (session.connectionMonitorInterval) {
-                clearInterval(session.connectionMonitorInterval);
-            }
+            // IMPORTANTE: Limpar TODOS os intervalos
+            clearAllSessionIntervals(session);
 
             reconnectAttempts = session.reconnectAttempts || 0;
             session.status = 'DISCONNECTED';
@@ -1436,58 +1383,59 @@ async function startSession(instanceId) {
             session.disconnectReason = reason;
             session.disconnectTime = Date.now();
 
+            // Remover listeners para evitar erros durante destruição
+            try {
+                client.removeAllListeners();
+            } catch (e) {}
+
             // Destruir cliente com timeout
             try {
                 await Promise.race([
                     client.destroy(),
-                    new Promise(resolve => setTimeout(resolve, 10000))
+                    new Promise(resolve => setTimeout(resolve, CONNECTION_CONFIG.DESTROY_TIMEOUT))
                 ]);
             } catch (e) {
-                console.error(`[${instanceId}] Error destroying client:`, e.message);
+                // Ignorar erros de contexto destruído
+                if (!e.message.includes('context') && !e.message.includes('destroyed')) {
+                    console.error(`[${instanceId}] Error destroying client:`, e.message);
+                }
             }
         }
         sessions.delete(instanceId);
 
         // ========================================
-        // RECONEXÃO AUTOMÁTICA INTELIGENTE APRIMORADA
+        // RECONEXÃO AUTOMÁTICA SEMPRE ATIVA
         // ========================================
         const noReconnectReasons = ['LOGOUT', 'TOS_BLOCK', 'SMB_TOS_BLOCK'];
-        const immediateReconnectReasons = ['CONFLICT', 'UNPAIRED', 'NAVIGATION'];
-        const maxReconnectAttempts = 10; // Aumentado de 5 para 10
+        const immediateReconnectReasons = ['CONFLICT', 'UNPAIRED', 'NAVIGATION', 'TIMEOUT'];
+        const maxReconnectAttempts = CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS;
 
         if (noReconnectReasons.includes(reason)) {
             console.log(`[${instanceId}] ⛔ Reconexão desabilitada para: ${reason}`);
             return;
         }
 
+        // SEMPRE tentar reconectar, resetar contador se atingir máximo
         if (reconnectAttempts >= maxReconnectAttempts) {
-            console.log(`[${instanceId}] ⛔ Máximo de tentativas de reconexão atingido (${maxReconnectAttempts})`);
-            // Resetar contador após 30 minutos para permitir novas tentativas
-            setTimeout(() => {
-                console.log(`[${instanceId}] 🔄 Resetando contador de reconexões após 30 minutos`);
-                // Tentar reconectar novamente
-                if (!sessions.has(instanceId)) {
-                    startSession(instanceId);
-                }
-            }, 1800000); // 30 minutos
-            return;
+            console.log(`[${instanceId}] ⚠️ Máximo atingido, resetando contador e tentando novamente...`);
+            reconnectAttempts = 0; // Resetar imediatamente e continuar tentando
         }
 
         // Calcular delay com backoff exponencial
         let delay;
         if (immediateReconnectReasons.includes(reason)) {
             // Reconexão rápida para conflitos e navegação
-            delay = 3000 + (reconnectAttempts * 2000); // 3s, 5s, 7s...
+            delay = 3000 + (reconnectAttempts * 1500); // 3s, 4.5s, 6s...
         } else {
-            // Backoff exponencial para outros casos (5s, 10s, 20s, 40s... max 5 min)
-            const baseDelay = 5000;
-            delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts), 300000);
+            // Backoff exponencial para outros casos (5s, 10s, 20s... max 2 min)
+            const baseDelay = CONNECTION_CONFIG.RECONNECT_BASE_DELAY;
+            delay = Math.min(baseDelay * Math.pow(1.5, reconnectAttempts), 120000);
         }
 
-        // Adicionar jitter para evitar thundering herd
-        delay += Math.random() * 3000;
+        // Adicionar jitter
+        delay += Math.random() * 2000;
 
-        console.log(`[${instanceId}] 🔄 Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1}/${maxReconnectAttempts})`);
+        console.log(`[${instanceId}] 🔄 Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1})`);
 
         setTimeout(async() => {
             try {
@@ -3323,15 +3271,15 @@ function startHealthCheck() {
         await deepHealthCheck();
     }, CONNECTION_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
 
-    // Recovery check a cada 3 minutos
+    // Recovery check a cada 1 minuto (mais agressivo)
     instanceRecoveryInterval = setInterval(async() => {
         await instanceRecoveryCheck();
-    }, 180000);
+    }, 60000);
 
     console.log(`[HealthCheck] 🏥 Sistema de monitoramento ULTRA-ROBUSTO iniciado:`);
     console.log(`    - Health Check: ${CONNECTION_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
     console.log(`    - Deep Check: ${CONNECTION_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
-    console.log(`    - Recovery Check: 180s`);
+    console.log(`    - Recovery Check: 60s (AGRESSIVO)`);
 }
 
 function stopHealthCheck() {
@@ -3374,8 +3322,8 @@ function stopHealthCheck() {
         console.log(`   • Presença Update: ${CONNECTION_CONFIG.PRESENCE_UPDATE_INTERVAL/1000}s`);
         console.log(`   • Health Check: ${CONNECTION_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
         console.log(`   • Deep Check: ${CONNECTION_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
-        console.log(`   • Watchdog: 45s`);
-        console.log(`   • Recovery Check: 180s`);
+        console.log(`   • Watchdog: 60s`);
+        console.log(`   • Recovery Check: 60s (AGRESSIVO)`);
         console.log(`   • Max Reconexões: ${CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS}`);
 
         console.log(`\n🔒 CONFIGURAÇÕES DE SEGURANÇA:`);
