@@ -3231,22 +3231,17 @@ async function deepHealthCheck() {
     }
 }
 
-// Verificação de recuperação de instâncias
+// Verificação de recuperação de instâncias - FUNCIONA SEM BANCO DE DADOS
 async function instanceRecoveryCheck() {
-    if (!pool) return;
-
     try {
-        // Buscar instâncias que deveriam estar ativas
-        const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
-
-        for (const row of rows) {
-            const session = sessions.get(row.id);
-
-            // Se não tem sessão, iniciar
-            if (!session) {
-                console.log(`[Recovery] ${row.id}: 🔄 Instância ativa sem sessão - iniciando...`);
-                await startSession(row.id);
-                await new Promise(resolve => setTimeout(resolve, 3000)); // Delay entre inicializações
+        // Verificar sessões em memória que precisam de reconexão
+        for (const [instanceId, session] of sessions) {
+            // Se a sessão está marcada para reconexão
+            if (session.needsReconnect) {
+                console.log(`[Recovery] ${instanceId}: 🔄 Sessão marcada para reconexão...`);
+                session.needsReconnect = false;
+                await forceReconnect(instanceId, 'RECOVERY_MARCADA');
+                await new Promise(resolve => setTimeout(resolve, 5000));
                 continue;
             }
 
@@ -3254,10 +3249,34 @@ async function instanceRecoveryCheck() {
             if (session.status !== 'CONNECTED' && session.status !== 'QR_CODE') {
                 const timeSinceLoad = Date.now() - (session.loadingStartTime || Date.now());
                 if (timeSinceLoad > CONNECTION_CONFIG.LOADING_TIMEOUT * 2) {
-                    console.log(`[Recovery] ${row.id}: 🔄 Sessão travada em ${session.status} - forçando reconexão...`);
-                    await forceReconnect(row.id, 'RECOVERY_TRAVADA');
+                    console.log(`[Recovery] ${instanceId}: 🔄 Sessão travada em ${session.status} - forçando reconexão...`);
+                    await forceReconnect(instanceId, 'RECOVERY_TRAVADA');
                     await new Promise(resolve => setTimeout(resolve, 5000));
                 }
+            }
+
+            // Se a sessão está DISCONNECTED, tentar reconectar
+            if (session.status === 'DISCONNECTED') {
+                console.log(`[Recovery] ${instanceId}: 🔄 Sessão desconectada - tentando reconectar...`);
+                await startSession(instanceId);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+        }
+
+        // Tentar buscar do banco apenas se disponível (não bloqueia se falhar)
+        if (pool) {
+            try {
+                const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
+                for (const row of rows) {
+                    if (!sessions.has(row.id)) {
+                        console.log(`[Recovery] ${row.id}: 🔄 Instância ativa sem sessão - iniciando...`);
+                        await startSession(row.id);
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    }
+                }
+            } catch (dbErr) {
+                // Banco não disponível, usar apenas sessões em memória
+                // Isso é OK - o sistema continua funcionando
             }
         }
     } catch (err) {
