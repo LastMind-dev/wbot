@@ -15,39 +15,26 @@ const multer = require('multer');
 require('dotenv').config();
 
 // ========================================
-// CONFIGURAÇÕES DE ESTABILIDADE DE CONEXÃO
+// MÓDULOS DE RESILIÊNCIA
 // ========================================
-const CONNECTION_CONFIG = {
-    // Intervalos de verificação (em ms)
-    HEARTBEAT_INTERVAL: 15000, // Ping a cada 15 segundos (balanceado)
-    WEBSOCKET_CHECK_INTERVAL: 30000, // Verificar WebSocket a cada 30s
-    PRESENCE_UPDATE_INTERVAL: 45000, // Atualizar presença a cada 45s
-    HEALTH_CHECK_INTERVAL: 30000, // Health check a cada 30s
-    DEEP_HEALTH_CHECK_INTERVAL: 120000, // Deep check a cada 2 min
+const { logger } = require('./lib/logger');
+const {
+    CONNECTION_STATUS,
+    RESILIENCE_CONFIG,
+    PUPPETEER_CONFIG,
+    WHATSAPP_CLIENT_CONFIG,
+    calculateReconnectDelay,
+    shouldReconnect,
+    isImmediateReconnect
+} = require('./lib/config');
+const { sessionManager } = require('./lib/sessionManager');
+const { shutdownHandler } = require('./lib/shutdownHandler');
+const { memoryMonitor } = require('./lib/memoryMonitor');
 
-    // Timeouts
-    STATE_CHECK_TIMEOUT: 15000, // Timeout para verificar estado (aumentado)
-    DESTROY_TIMEOUT: 10000, // Timeout para destruir cliente
-    INIT_TIMEOUT: 180000, // 3 min para inicialização
-
-    // Limites de reconexão
-    MAX_RECONNECT_ATTEMPTS: 20, // Máximo de tentativas (aumentado)
-    MAX_CONSECUTIVE_FAILURES: 3, // Falhas antes de reconectar (aumentado)
-
-    // Delays
-    RECONNECT_BASE_DELAY: 5000, // Delay base para reconexão (aumentado)
-    RECONNECT_MAX_DELAY: 300000, // Máximo 5 minutos de delay
-
-    // Thresholds
-    INACTIVITY_THRESHOLD: 180000, // 3 minutos sem atividade = problema
-    LOADING_TIMEOUT: 120000, // 2 min máximo em loading
-    PING_TIMEOUT_THRESHOLD: 90000, // 1.5 min sem ping = problema
-
-    // NOVOS: Proteção contra erros de contexto
-    CONTEXT_ERROR_COOLDOWN: 5000, // Espera após erro de contexto
-    MAX_CONTEXT_ERRORS: 3, // Máximo de erros de contexto antes de reconectar
-    PAGE_NAVIGATION_DELAY: 3000, // Delay após navegação detectada
-};
+// ========================================
+// ALIAS PARA CONFIGURAÇÕES (compatibilidade)
+// ========================================
+const CONNECTION_CONFIG = RESILIENCE_CONFIG;
 
 // ========================================
 // TRATAMENTO DE ERROS GLOBAIS
@@ -612,9 +599,9 @@ console.log('-----------------------');
 
 let pool;
 
-// Store active sessions
-// Map<instanceId, { client: Client, qr: string|null, status: string }>
-const sessions = new Map();
+// Store active sessions - Usando sessionManager para gerenciamento resiliente
+// Mantendo 'sessions' como alias para compatibilidade
+const sessions = sessionManager.sessions;
 
 // Middleware de Autenticação
 function requireAuth(req, res, next) {
@@ -627,9 +614,9 @@ function requireAuth(req, res, next) {
 async function initDB() {
     try {
         pool = mysql.createPool(dbConfig);
-        console.log('Database pool created');
+        logger.info(null, 'Database pool created');
 
-        // 0. Criar tabela de instâncias se não existir
+        // 0. Criar tabela de instâncias se não existir (com novas colunas de resiliência)
         await pool.execute(`
             CREATE TABLE IF NOT EXISTS instances (
                 id VARCHAR(255) PRIMARY KEY,
@@ -639,10 +626,34 @@ async function initDB() {
                 api_token VARCHAR(255),
                 phone_number VARCHAR(50),
                 status INT DEFAULT 0,
+                enabled TINYINT(1) DEFAULT 1,
+                connection_status VARCHAR(50) DEFAULT 'DISCONNECTED',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_connection TIMESTAMP NULL
+                last_connection TIMESTAMP NULL,
+                last_disconnect_reason VARCHAR(255) NULL,
+                reconnect_attempts INT DEFAULT 0
             )
         `);
+
+        // Adicionar novas colunas se não existirem (migração)
+        const columnsToAdd = [
+            { name: 'enabled', definition: 'TINYINT(1) DEFAULT 1' },
+            { name: 'connection_status', definition: "VARCHAR(50) DEFAULT 'DISCONNECTED'" },
+            { name: 'last_disconnect_reason', definition: 'VARCHAR(255) NULL' },
+            { name: 'reconnect_attempts', definition: 'INT DEFAULT 0' }
+        ];
+
+        for (const col of columnsToAdd) {
+            try {
+                await pool.execute(`ALTER TABLE instances ADD COLUMN ${col.name} ${col.definition}`);
+                logger.info(null, `Coluna "${col.name}" adicionada à tabela instances`);
+            } catch (e) {
+                // Coluna já existe, ignorar
+            }
+        }
+
+        // Migrar dados antigos: se status=1 e enabled não definido, setar enabled=1
+        await pool.execute(`UPDATE instances SET enabled = 1 WHERE status = 1 AND enabled IS NULL`).catch(() => {});
 
         // Garantir que a coluna name existe (para tabelas antigas)
         try {
@@ -685,19 +696,115 @@ async function initDB() {
             console.log('=============================================================\n');
         }
 
-        // Auto-start instances that are marked as connected (status = 1)
-        const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
-        console.log(`Found ${rows.length} active instances to restore.`);
+        // ═══════════════════════════════════════════════════════════════
+        // REIDRATAÇÃO AUTOMÁTICA: Restaurar instâncias com enabled=1
+        // Baseado em 'enabled' (intenção) e não 'connection_status' (estado momentâneo)
+        // ═══════════════════════════════════════════════════════════════
+        const [rows] = await pool.execute('SELECT id, name FROM instances WHERE enabled = 1');
+        logger.info(null, `Reidratação: ${rows.length} instâncias marcadas para auto-start`);
 
         for (const row of rows) {
+            logger.session(row.id, `Restaurando instância "${row.name || row.id}"...`);
+
+            // Atualizar status para RECONNECTING antes de iniciar
+            await pool.execute(
+                'UPDATE instances SET connection_status = ? WHERE id = ?', [CONNECTION_STATUS.RECONNECTING, row.id]
+            ).catch(() => {});
+
+            // Delay entre inicializações para não sobrecarregar
+            await new Promise(resolve => setTimeout(resolve, 2000));
             startSession(row.id);
         }
+
+        // Inicializar handlers de shutdown e monitoramento
+        shutdownHandler.init(sessionManager, pool);
+        memoryMonitor.init(sessionManager, forceReconnect);
+
     } catch (err) {
-        console.error('Database initialization error:', err);
+        logger.error(null, 'Database initialization error', { error: err.message });
     }
 }
 
-async function updateInstanceStatus(instanceId, status, phoneNumber = null) {
+/**
+ * Atualiza o status da instância no banco de dados
+ * @param {string} instanceId - ID da instância
+ * @param {number} status - Status numérico (0=desconectado, 1=conectado) - compatibilidade
+ * @param {string} phoneNumber - Número de telefone (opcional)
+ * @param {string} connectionStatus - Status detalhado de conexão (opcional)
+ * @param {string} disconnectReason - Razão da desconexão (opcional)
+ */
+/**
+ * Força reconexão de uma instância com cleanup completo
+ * @param {string} instanceId - ID da instância
+ * @param {string} reason - Razão da reconexão
+ */
+async function forceReconnect(instanceId, reason) {
+    logger.reconnect(instanceId, `Forçando reconexão: ${reason}`);
+
+    const session = sessionManager.get(instanceId);
+
+    if (session) {
+        session.prepareForReconnect();
+
+        try {
+            if (session.client) {
+                session.client.removeAllListeners();
+                await Promise.race([
+                    session.client.destroy(),
+                    new Promise(resolve => setTimeout(resolve, RESILIENCE_CONFIG.DESTROY_TIMEOUT))
+                ]);
+            }
+        } catch (e) {
+            const errMsg = e && e.message ? e.message : '';
+            if (!errMsg.includes('context') && !errMsg.includes('destroyed')) {
+                logger.error(instanceId, `Erro ao destruir cliente: ${errMsg}`);
+            }
+        }
+
+        sessionManager.delete(instanceId);
+    }
+
+    await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.RECONNECTING, reason);
+
+    // Calcular delay com backoff
+    const attempts = (session && session.reconnectAttempts) ? session.reconnectAttempts : 0;
+    const isImmediate = isImmediateReconnect(reason);
+    const delay = calculateReconnectDelay(attempts, isImmediate);
+
+    logger.reconnect(instanceId, `Reconectando em ${Math.round(delay/1000)}s (tentativa ${attempts + 1})`);
+
+    setTimeout(async() => {
+        if (!sessionManager.has(instanceId)) {
+            try {
+                const newSession = await startSession(instanceId);
+                if (newSession) {
+                    newSession.incrementReconnectAttempts();
+
+                    // Resetar contador após 30 min conectado
+                    setTimeout(() => {
+                        const s = sessionManager.get(instanceId);
+                        if (s && s.status === CONNECTION_STATUS.CONNECTED) {
+                            s.resetCounters();
+                            logger.session(instanceId, 'Contador de reconexões resetado');
+                        }
+                    }, RESILIENCE_CONFIG.RECONNECT_RESET_AFTER);
+                }
+            } catch (err) {
+                logger.error(instanceId, `Erro na reconexão: ${err.message}`);
+            }
+        }
+    }, delay);
+}
+
+/**
+ * Atualiza o status da instância no banco de dados
+ * @param {string} instanceId - ID da instância
+ * @param {number} status - Status numérico (0=desconectado, 1=conectado) - compatibilidade
+ * @param {string} phoneNumber - Número de telefone (opcional)
+ * @param {string} connectionStatus - Status detalhado de conexão (opcional)
+ * @param {string} disconnectReason - Razão da desconexão (opcional)
+ */
+async function updateInstanceStatus(instanceId, status, phoneNumber = null, connectionStatus = null, disconnectReason = null) {
     if (!pool) return;
     try {
         let query = 'UPDATE instances SET status = ?, last_connection = NOW()';
@@ -708,30 +815,64 @@ async function updateInstanceStatus(instanceId, status, phoneNumber = null) {
             params.push(phoneNumber);
         }
 
+        // Atualizar connection_status detalhado
+        if (connectionStatus) {
+            query += ', connection_status = ?';
+            params.push(connectionStatus);
+        } else {
+            // Mapear status numérico para connection_status
+            query += ', connection_status = ?';
+            params.push(status === 1 ? CONNECTION_STATUS.CONNECTED : CONNECTION_STATUS.DISCONNECTED);
+        }
+
+        // Registrar razão de desconexão
+        if (disconnectReason) {
+            query += ', last_disconnect_reason = ?';
+            params.push(disconnectReason);
+        }
+
         query += ' WHERE id = ?';
         params.push(instanceId);
 
         await pool.execute(query, params);
+        logger.session(instanceId, `Status atualizado: ${connectionStatus || (status === 1 ? 'CONNECTED' : 'DISCONNECTED')}`);
     } catch (error) {
-        console.error(`Error updating status for ${instanceId}:`, error);
+        logger.error(instanceId, `Erro ao atualizar status: ${error.message}`);
     }
 }
 
 async function startSession(instanceId) {
-    if (sessions.has(instanceId)) {
-        const session = sessions.get(instanceId);
-        if (session.client) {
-            console.log(`Session ${instanceId} already active`);
-            return session;
+    // Verificar se já existe sessão ativa
+    if (sessionManager.has(instanceId)) {
+        const existingSession = sessionManager.get(instanceId);
+        if (existingSession.client && existingSession.status !== CONNECTION_STATUS.DISCONNECTED) {
+            logger.session(instanceId, 'Sessão já ativa, ignorando');
+            return existingSession;
         }
     }
 
-    console.log(`Starting session for ${instanceId}`);
+    logger.session(instanceId, 'Iniciando sessão...');
+
+    // Atualizar status no banco
+    await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.INITIALIZING);
+
+    // Verificar se pasta de sessão existe (persistência)
+    const sessionPath = path.join(RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth'), `session-${instanceId}`);
+    const hasExistingSession = fs.existsSync(sessionPath);
+
+    if (hasExistingSession) {
+        logger.session(instanceId, 'Sessão persistente encontrada, restaurando...');
+    } else {
+        logger.session(instanceId, 'Nova sessão, será necessário QR Code');
+    }
 
     const client = new Client({
-        authStrategy: new LocalAuth({ clientId: instanceId }),
+        authStrategy: new LocalAuth({
+            clientId: instanceId,
+            dataPath: RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth')
+        }),
         puppeteer: {
-            headless: true,
+            ...PUPPETEER_CONFIG,
             // CONFIGURAÇÕES ULTRA-OTIMIZADAS PARA ESTABILIDADE
             args: [
                 '--no-sandbox',
@@ -796,39 +937,34 @@ async function startSession(instanceId) {
         bypassCSP: true
     });
 
-    // Initialize session state
-    sessions.set(instanceId, {
-        client: client,
-        qr: null,
-        status: 'INITIALIZING',
-        loadingStartTime: Date.now(),
-        keepAliveInterval: null,
-        connectionMonitorInterval: null,
-        lastActivity: Date.now(),
-        lastPing: Date.now(),
-        reconnectAttempts: 0,
-        consecutiveFailures: 0,
-        isReconnecting: false
-    });
+    // Initialize session state usando SessionManager
+    const session = sessionManager.getOrCreate(instanceId);
+    session.client = client;
+    session.qr = null;
+    session.status = CONNECTION_STATUS.INITIALIZING;
+    session.loadingStartTime = Date.now();
+    session.lastActivity = Date.now();
+    session.lastPing = Date.now();
+    session.isReconnecting = false;
 
     // ========================================
     // SISTEMA DE KEEP-ALIVE ULTRA-ROBUSTO
     // ========================================
     const startKeepAlive = () => {
-        const session = sessions.get(instanceId);
-        if (!session) return;
+        const currentSession = sessionManager.get(instanceId);
+        if (!currentSession) return;
 
         // Limpar todos os intervalos anteriores
-        clearAllSessionIntervals(session);
+        currentSession.clearIntervals();
 
-        console.log(`[${instanceId}] 💡 Iniciando sistema ULTRA-ROBUSTO de manutenção de conexão...`);
+        logger.session(instanceId, 'Iniciando sistema ULTRA-ROBUSTO de manutenção de conexão');
 
         // ========================================
         // 1. HEARTBEAT COM PROTEÇÃO DE CONTEXTO
         // ========================================
-        session.keepAliveInterval = setInterval(async() => {
-            const currentSession = sessions.get(instanceId);
-            if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
+        currentSession.intervals.keepAlive = setInterval(async() => {
+            const sess = sessionManager.get(instanceId);
+            if (!sess || !sess.client || sess.status !== CONNECTION_STATUS.CONNECTED) {
                 return;
             }
 
@@ -1814,7 +1950,7 @@ app.get('/api/instances', async(req, res) => {
 
     try {
         const [dbInstances] = await pool.execute(
-            'SELECT id, name, sistema_php_url, webhook, phone_number, status as db_status, created_at, last_connection FROM instances ORDER BY created_at DESC'
+            'SELECT id, name, sistema_php_url, webhook, api_token, phone_number, status as db_status, created_at, last_connection FROM instances ORDER BY created_at DESC'
         );
 
         console.log('[API /api/instances] Raw DB result:', JSON.stringify(dbInstances, null, 2));
@@ -1826,6 +1962,7 @@ app.get('/api/instances', async(req, res) => {
                 name: inst.name || 'Sem nome',
                 sistema_php_url: inst.sistema_php_url,
                 webhook: inst.webhook,
+                token: inst.api_token,
                 phone_number: inst.phone_number,
                 status: session ? session.status : 'DISCONNECTED',
                 db_status: inst.db_status,
@@ -1947,7 +2084,7 @@ app.post('/api/session/reconnect', async(req, res) => {
 
 // Forçar health check manual
 app.post('/api/health/check', async(req, res) => {
-    console.log('[HealthCheck] Verificação manual solicitada');
+    logger.health(null, 'Verificação manual solicitada');
 
     try {
         await healthCheck();
@@ -1956,7 +2093,92 @@ app.post('/api/health/check', async(req, res) => {
         res.json({
             success: true,
             message: 'Health check executado',
-            sessions: sessions.size
+            sessions: sessionManager.size
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========================================
+// API: Controle de enabled (auto-start)
+// ========================================
+app.post('/api/instance/:id/enable', async(req, res) => {
+    const { id } = req.params;
+
+    if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
+
+    try {
+        await pool.execute('UPDATE instances SET enabled = 1 WHERE id = ?', [id]);
+        logger.session(id, 'Instância marcada como enabled=1 (auto-start)');
+
+        // Iniciar sessão se não estiver ativa
+        if (!sessionManager.has(id)) {
+            startSession(id);
+        }
+
+        res.json({ success: true, message: 'Instância habilitada para auto-start' });
+    } catch (err) {
+        logger.error(id, `Erro ao habilitar: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/instance/:id/disable', async(req, res) => {
+    const { id } = req.params;
+
+    if (!pool) return res.status(500).json({ error: 'Banco de dados não conectado' });
+
+    try {
+        await pool.execute('UPDATE instances SET enabled = 0 WHERE id = ?', [id]);
+        logger.session(id, 'Instância marcada como enabled=0 (sem auto-start)');
+
+        res.json({ success: true, message: 'Instância desabilitada de auto-start (não será reconectada automaticamente)' });
+    } catch (err) {
+        logger.error(id, `Erro ao desabilitar: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========================================
+// API: Relatório de Memória
+// ========================================
+app.get('/api/memory/report', async(req, res) => {
+    try {
+        const report = memoryMonitor.getReport();
+        res.json({
+            success: true,
+            report
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========================================
+// API: Status detalhado de uma instância
+// ========================================
+app.get('/api/instance/:id/details', async(req, res) => {
+    const { id } = req.params;
+
+    try {
+        // Buscar do banco
+        let dbData = null;
+        if (pool) {
+            const [rows] = await pool.execute(
+                'SELECT id, name, enabled, connection_status, phone_number, last_connection, last_disconnect_reason, reconnect_attempts FROM instances WHERE id = ?', [id]
+            );
+            if (rows.length > 0) dbData = rows[0];
+        }
+
+        // Buscar da memória
+        const session = sessionManager.get(id);
+
+        res.json({
+            success: true,
+            database: dbData,
+            memory: session ? session.toJSON() : null,
+            inSync: dbData && session ? (dbData.connection_status === session.status) : null
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -3131,22 +3353,24 @@ async function healthCheck() {
 }
 
 // Verificar instâncias que deveriam estar ativas mas não estão
+// IMPORTANTE: Usa enabled=1 (intenção) ao invés de status=1 (estado momentâneo)
 async function checkMissingInstances() {
     if (!pool) return;
 
     try {
-        const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
+        // Buscar instâncias com enabled=1 (marcadas para auto-start)
+        const [rows] = await pool.execute('SELECT id, name FROM instances WHERE enabled = 1');
 
         for (const row of rows) {
-            if (!sessions.has(row.id)) {
-                console.log(`[HealthCheck] 🔄 Instância ${row.id} deveria estar ativa. Iniciando...`);
+            if (!sessionManager.has(row.id)) {
+                logger.health(row.id, `Instância "${row.name}" deveria estar ativa. Iniciando...`);
                 startSession(row.id);
                 // Aguardar um pouco entre inicializações para não sobrecarregar
                 await new Promise(resolve => setTimeout(resolve, 5000));
             }
         }
     } catch (err) {
-        console.error('[HealthCheck] Erro ao verificar instâncias:', err.message);
+        logger.error(null, `Erro ao verificar instâncias: ${err.message}`);
     }
 }
 
@@ -3232,13 +3456,20 @@ async function deepHealthCheck() {
 }
 
 // Verificação de recuperação de instâncias - FUNCIONA SEM BANCO DE DADOS
+// Integrado com memoryMonitor para detectar zumbis e sessões travadas
 async function instanceRecoveryCheck() {
     try {
-        // Verificar sessões em memória que precisam de reconexão
-        for (const [instanceId, session] of sessions) {
+        // 1. Detectar e recuperar sessões zumbis via memoryMonitor
+        await memoryMonitor.detectZombies();
+
+        // 2. Detectar e recuperar sessões travadas
+        await memoryMonitor.detectStuckSessions();
+
+        // 3. Verificar sessões em memória que precisam de reconexão
+        for (const [instanceId, session] of sessionManager.entries()) {
             // Se a sessão está marcada para reconexão
             if (session.needsReconnect) {
-                console.log(`[Recovery] ${instanceId}: 🔄 Sessão marcada para reconexão...`);
+                logger.reconnect(instanceId, 'Sessão marcada para reconexão');
                 session.needsReconnect = false;
                 await forceReconnect(instanceId, 'RECOVERY_MARCADA');
                 await new Promise(resolve => setTimeout(resolve, 5000));
@@ -3246,65 +3477,76 @@ async function instanceRecoveryCheck() {
             }
 
             // Se tem sessão mas não está conectada há muito tempo, forçar reconexão
-            if (session.status !== 'CONNECTED' && session.status !== 'QR_CODE') {
+            if (session.status !== CONNECTION_STATUS.CONNECTED && session.status !== CONNECTION_STATUS.QR_REQUIRED) {
                 const timeSinceLoad = Date.now() - (session.loadingStartTime || Date.now());
-                if (timeSinceLoad > CONNECTION_CONFIG.LOADING_TIMEOUT * 2) {
-                    console.log(`[Recovery] ${instanceId}: 🔄 Sessão travada em ${session.status} - forçando reconexão...`);
+                if (timeSinceLoad > RESILIENCE_CONFIG.LOADING_TIMEOUT * 2) {
+                    logger.reconnect(instanceId, `Sessão travada em ${session.status} - forçando reconexão`);
                     await forceReconnect(instanceId, 'RECOVERY_TRAVADA');
                     await new Promise(resolve => setTimeout(resolve, 5000));
                 }
             }
 
             // Se a sessão está DISCONNECTED, tentar reconectar
-            if (session.status === 'DISCONNECTED') {
-                console.log(`[Recovery] ${instanceId}: 🔄 Sessão desconectada - tentando reconectar...`);
+            if (session.status === CONNECTION_STATUS.DISCONNECTED) {
+                logger.reconnect(instanceId, 'Sessão desconectada - tentando reconectar');
                 await startSession(instanceId);
                 await new Promise(resolve => setTimeout(resolve, 5000));
             }
         }
 
-        // Tentar buscar do banco apenas se disponível (não bloqueia se falhar)
+        // 4. Buscar do banco instâncias com enabled=1 que não estão em memória
         if (pool) {
             try {
-                const [rows] = await pool.execute('SELECT id FROM instances WHERE status = 1');
+                const [rows] = await pool.execute('SELECT id, name FROM instances WHERE enabled = 1');
                 for (const row of rows) {
-                    if (!sessions.has(row.id)) {
-                        console.log(`[Recovery] ${row.id}: 🔄 Instância ativa sem sessão - iniciando...`);
+                    if (!sessionManager.has(row.id)) {
+                        logger.reconnect(row.id, `Instância "${row.name}" habilitada sem sessão - iniciando`);
                         await startSession(row.id);
                         await new Promise(resolve => setTimeout(resolve, 3000));
                     }
                 }
             } catch (dbErr) {
                 // Banco não disponível, usar apenas sessões em memória
-                // Isso é OK - o sistema continua funcionando
             }
         }
     } catch (err) {
-        console.error('[Recovery] Erro:', err.message);
+        logger.error(null, `Erro no recovery check: ${err.message}`);
     }
 }
+
+let memoryCheckInterval = null;
 
 function startHealthCheck() {
     // Health check agressivo
     healthCheckInterval = setInterval(async() => {
         await healthCheck();
         await checkMissingInstances();
-    }, CONNECTION_CONFIG.HEALTH_CHECK_INTERVAL);
+    }, RESILIENCE_CONFIG.HEALTH_CHECK_INTERVAL);
+    shutdownHandler.registerInterval(healthCheckInterval);
 
     // Deep health check
     deepHealthCheckInterval = setInterval(async() => {
         await deepHealthCheck();
-    }, CONNECTION_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
+    }, RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
+    shutdownHandler.registerInterval(deepHealthCheckInterval);
 
     // Recovery check a cada 1 minuto (mais agressivo)
     instanceRecoveryInterval = setInterval(async() => {
         await instanceRecoveryCheck();
-    }, 60000);
+    }, RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL);
+    shutdownHandler.registerInterval(instanceRecoveryInterval);
 
-    console.log(`[HealthCheck] 🏥 Sistema de monitoramento ULTRA-ROBUSTO iniciado:`);
-    console.log(`    - Health Check: ${CONNECTION_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
-    console.log(`    - Deep Check: ${CONNECTION_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
-    console.log(`    - Recovery Check: 60s (AGRESSIVO)`);
+    // Memory check - monitoramento de memória e zumbis
+    memoryCheckInterval = setInterval(async() => {
+        await memoryMonitor.check();
+    }, RESILIENCE_CONFIG.MEMORY_CHECK_INTERVAL);
+    shutdownHandler.registerInterval(memoryCheckInterval);
+
+    logger.section('SISTEMA DE MONITORAMENTO INICIADO');
+    logger.config('Health Check', `${RESILIENCE_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
+    logger.config('Deep Check', `${RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
+    logger.config('Recovery Check', `${RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL/1000}s`);
+    logger.config('Memory Check', `${RESILIENCE_CONFIG.MEMORY_CHECK_INTERVAL/1000}s`);
 }
 
 function stopHealthCheck() {
@@ -3320,6 +3562,11 @@ function stopHealthCheck() {
         clearInterval(instanceRecoveryInterval);
         instanceRecoveryInterval = null;
     }
+    if (memoryCheckInterval) {
+        clearInterval(memoryCheckInterval);
+        memoryCheckInterval = null;
+    }
+    logger.info(null, 'Sistema de monitoramento parado');
 }
 
 // ========================================
@@ -3330,42 +3577,55 @@ function stopHealthCheck() {
     await initDB();
     await initGroupsTable();
 
-    // Iniciar health check após 15 segundos (mais rápido)
+    // Iniciar health check após 15 segundos
     setTimeout(() => {
         startHealthCheck();
     }, 15000);
 
     app.listen(PORT, () => {
-        console.log(`\n${'='.repeat(60)}`);
-        console.log(`🚀 WhatsApp Bot API - ULTRA-ROBUSTO v2.0`);
-        console.log(`${'='.repeat(60)}`);
-        console.log(`\n✅ Server running on port ${PORT}`);
+        logger.startup('WhatsApp Bot API - RESILIENTE v3.0');
 
-        console.log(`\n🛡️  SISTEMA DE ESTABILIDADE DE CONEXÃO:`);
-        console.log(`   • Heartbeat: ${CONNECTION_CONFIG.HEARTBEAT_INTERVAL/1000}s (ULTRA-AGRESSIVO)`);
-        console.log(`   • WebSocket Check: ${CONNECTION_CONFIG.WEBSOCKET_CHECK_INTERVAL/1000}s`);
-        console.log(`   • Presença Update: ${CONNECTION_CONFIG.PRESENCE_UPDATE_INTERVAL/1000}s`);
-        console.log(`   • Health Check: ${CONNECTION_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
-        console.log(`   • Deep Check: ${CONNECTION_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
-        console.log(`   • Watchdog: 60s`);
-        console.log(`   • Recovery Check: 60s (AGRESSIVO)`);
-        console.log(`   • Max Reconexões: ${CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS}`);
+        console.log(`✅ Server running on port ${PORT}`);
+        console.log(`📁 Session Storage: ${RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth')}`);
 
-        console.log(`\n🔒 CONFIGURAÇÕES DE SEGURANÇA:`);
-        console.log(`   • Timeout Estado: ${CONNECTION_CONFIG.STATE_CHECK_TIMEOUT/1000}s`);
-        console.log(`   • Timeout Destruir: ${CONNECTION_CONFIG.DESTROY_TIMEOUT/1000}s`);
-        console.log(`   • Threshold Inatividade: ${CONNECTION_CONFIG.INACTIVITY_THRESHOLD/1000}s`);
-        console.log(`   • Threshold Ping: ${CONNECTION_CONFIG.PING_TIMEOUT_THRESHOLD/1000}s`);
+        logger.section('SISTEMA DE RESILIÊNCIA');
+        logger.config('Heartbeat', `${RESILIENCE_CONFIG.HEARTBEAT_INTERVAL/1000}s`);
+        logger.config('WebSocket Check', `${RESILIENCE_CONFIG.WEBSOCKET_CHECK_INTERVAL/1000}s`);
+        logger.config('Health Check', `${RESILIENCE_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
+        logger.config('Deep Check', `${RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
+        logger.config('Recovery Check', `${RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL/1000}s`);
+        logger.config('Memory Check', `${RESILIENCE_CONFIG.MEMORY_CHECK_INTERVAL/1000}s`);
+        logger.config('Max Reconexões', `${RESILIENCE_CONFIG.MAX_RECONNECT_ATTEMPTS}`);
 
-        console.log(`\n📋 API de Grupos:`);
-        console.log(`   POST /api/group/create | GET /api/group/list/:instance`);
-        console.log(`   POST /api/group/add-participants | /api/group/send-message`);
+        logger.section('CONFIGURAÇÕES DE SEGURANÇA');
+        logger.config('Timeout Estado', `${RESILIENCE_CONFIG.STATE_CHECK_TIMEOUT/1000}s`);
+        logger.config('Timeout Destruir', `${RESILIENCE_CONFIG.DESTROY_TIMEOUT/1000}s`);
+        logger.config('Threshold Inatividade', `${RESILIENCE_CONFIG.INACTIVITY_THRESHOLD/1000}s`);
+        logger.config('Threshold Ping', `${RESILIENCE_CONFIG.PING_TIMEOUT_THRESHOLD/1000}s`);
+        logger.config('Threshold Zumbi', `${RESILIENCE_CONFIG.ZOMBIE_THRESHOLD/1000}s`);
 
-        console.log(`\n📋 API de Mensagens:`);
-        console.log(`   POST /api/send-text | /api/send-media | /api/agendar-program`);
+        logger.section('MODELO DE DADOS');
+        logger.config('enabled', 'Define se instância deve subir automaticamente');
+        logger.config('connection_status', 'Estado atual (CONNECTED, DISCONNECTED, RECONNECTING, etc)');
+        logger.config('Reidratação', 'Baseada em enabled=1, não no estado momentâneo');
 
-        console.log(`\n${'='.repeat(60)}`);
-        console.log(`💡 Sistema projetado para MÁXIMA ESTABILIDADE de conexão`);
-        console.log(`${'='.repeat(60)}\n`);
+        logger.section('FUNCIONALIDADES');
+        console.log('   ✅ Reconexão automática com backoff exponencial');
+        console.log('   ✅ Detecção de sessões zumbis e travadas');
+        console.log('   ✅ Monitoramento de memória');
+        console.log('   ✅ Shutdown gracioso (SIGINT, SIGTERM)');
+        console.log('   ✅ Persistência segura de sessão');
+        console.log('   ✅ Reidratação automática de instâncias');
+        console.log('   ✅ Logs estruturados por categoria');
+
+        logger.section('APIs DISPONÍVEIS');
+        console.log('   📱 POST /api/send-text | /api/send-media | /api/agendar-program');
+        console.log('   👥 POST /api/group/create | GET /api/group/list/:instance');
+        console.log('   🔧 GET /api/health | POST /api/health/check');
+        console.log('   📊 GET /api/instances | GET /api/session/status/:id');
+
+        console.log(`\n${'═'.repeat(60)}`);
+        console.log('💡 Sistema projetado para MÁXIMA RESILIÊNCIA e DISPONIBILIDADE');
+        console.log(`${'═'.repeat(60)}\n`);
     });
 })();
