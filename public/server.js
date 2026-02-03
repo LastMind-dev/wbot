@@ -596,7 +596,10 @@ const dbConfig = {
     database: process.env.DB_NAME || 'tabel_wbot1',
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+    // Fix para MySQL 8.4+ que não tem mysql_native_password por padrão
+    authPlugins: undefined,
+    connectAttributes: undefined
 };
 
 console.log('--- DEBUG DB CONFIG ---');
