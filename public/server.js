@@ -593,7 +593,10 @@ const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'usr_wbot1',
     password: process.env.DB_PASSWORD || '7Rv4O&2flvuG0utpf',
-    database: process.env.DB_NAME || 'tabel_wbot1'
+    database: process.env.DB_NAME || 'tabel_wbot1',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 };
 
 console.log('--- DEBUG DB CONFIG ---');
