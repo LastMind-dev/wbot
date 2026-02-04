@@ -4,9 +4,9 @@
  */
 
 const { logger } = require('./logger');
-const { 
-    CONNECTION_STATUS, 
-    RESILIENCE_CONFIG, 
+const {
+    CONNECTION_STATUS,
+    RESILIENCE_CONFIG,
     calculateReconnectDelay,
     shouldReconnect,
     isImmediateReconnect
@@ -21,7 +21,7 @@ class SessionState {
         this.client = null;
         this.qr = null;
         this.status = CONNECTION_STATUS.DISCONNECTED;
-        
+
         // Timestamps
         this.createdAt = Date.now();
         this.loadingStartTime = null;
@@ -32,28 +32,25 @@ class SessionState {
         this.lastSessionSave = null;
         this.authenticatedAt = null;
         this.disconnectTime = null;
-        
+
         // Contadores
         this.reconnectAttempts = 0;
         this.consecutiveFailures = 0;
         this.contextErrors = 0;
         this.wsCheckFailures = 0;
-        
+
         // Flags
         this.isReconnecting = false;
         this.needsReconnect = false;
         this.isShuttingDown = false;
-        
-        // Intervalos (para cleanup)
+
+        // Intervalos (para cleanup) - mapeado com nomes usados no server.js
         this.intervals = {
             keepAlive: null,
             websocketCheck: null,
-            presence: null,
-            watchdog: null,
-            gc: null,
-            connectionMonitor: null
+            watchdog: null
         };
-        
+
         // Metadados
         this.disconnectReason = null;
         this.authFailureReason = null;
@@ -67,11 +64,11 @@ class SessionState {
         const oldStatus = this.status;
         this.status = newStatus;
         this.lastActivity = Date.now();
-        
+
         if (oldStatus !== newStatus) {
             logger.session(this.instanceId, `Status: ${oldStatus} → ${newStatus}`);
         }
-        
+
         return this;
     }
 
@@ -111,7 +108,7 @@ class SessionState {
      */
     hasExceededFailureThreshold() {
         return this.consecutiveFailures >= RESILIENCE_CONFIG.MAX_CONSECUTIVE_FAILURES ||
-               this.contextErrors >= RESILIENCE_CONFIG.MAX_CONTEXT_ERRORS;
+            this.contextErrors >= RESILIENCE_CONFIG.MAX_CONTEXT_ERRORS;
     }
 
     /**
@@ -138,7 +135,7 @@ class SessionState {
      */
     isZombie() {
         if (this.status !== CONNECTION_STATUS.CONNECTED) return false;
-        
+
         const timeSinceLastPing = Date.now() - (this.lastSuccessfulPing || Date.now());
         return timeSinceLastPing > RESILIENCE_CONFIG.ZOMBIE_THRESHOLD;
     }
@@ -183,13 +180,13 @@ class SessionState {
      */
     incrementReconnectAttempts() {
         this.reconnectAttempts++;
-        
+
         // Reset após máximo atingido (sistema resiliente)
         if (this.reconnectAttempts >= RESILIENCE_CONFIG.MAX_RECONNECT_ATTEMPTS) {
             logger.warn(this.instanceId, `Máximo de tentativas atingido (${RESILIENCE_CONFIG.MAX_RECONNECT_ATTEMPTS}), resetando contador`);
             this.reconnectAttempts = 0;
         }
-        
+
         return this;
     }
 
@@ -201,16 +198,16 @@ class SessionState {
             instanceId: this.instanceId,
             status: this.status,
             hasClient: !!this.client,
-            hasBrowser: this.client?.pupBrowser?.isConnected() || false,
-            hasPage: this.client?.pupPage && !this.client.pupPage.isClosed(),
+            hasBrowser: this.client ? .pupBrowser ? .isConnected() || false,
+            hasPage: this.client ? .pupPage && !this.client.pupPage.isClosed(),
             hasQr: !!this.qr,
             lastActivity: this.lastActivity,
             lastPing: this.lastSuccessfulPing,
             reconnectAttempts: this.reconnectAttempts,
             consecutiveFailures: this.consecutiveFailures,
             isReconnecting: this.isReconnecting,
-            uptime: this.status === CONNECTION_STATUS.CONNECTED ? 
-                    Date.now() - (this.authenticatedAt || this.createdAt) : 0
+            uptime: this.status === CONNECTION_STATUS.CONNECTED ?
+                Date.now() - (this.authenticatedAt || this.createdAt) : 0
         };
     }
 }
@@ -316,7 +313,7 @@ class SessionManager {
      * Detecta sessões inativas
      */
     getInactiveSessions() {
-        return this.toArray().filter(s => 
+        return this.toArray().filter(s =>
             s.status === CONNECTION_STATUS.CONNECTED && s.isInactive()
         );
     }
