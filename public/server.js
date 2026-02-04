@@ -1068,7 +1068,7 @@ async function startSession(instanceId) {
                     currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
                 }
 
-                if ((currentSession.wsCheckFailures || 0) >= 4) {
+                if ((currentSession.wsCheckFailures || 0) >= 6) {
                     console.log(`[${instanceId}] 🔴 WS-CHECK: Muitas falhas - Reconectando...`);
                     await handleConnectionLoss(instanceId, 'WEBSOCKET_DEAD');
                 }
@@ -3370,8 +3370,8 @@ async function healthCheck() {
                 }
             }
 
-            // 7. Verificar falhas no WebSocket check
-            if (session.status === 'CONNECTED' && (session.wsCheckFailures || 0) >= 2) {
+            // 7. Verificar falhas no WebSocket check (aumentado para 5 falhas - era 2)
+            if (session.status === 'CONNECTED' && (session.wsCheckFailures || 0) >= 5) {
                 console.log(`[HealthCheck] ${instanceId}: 🔴 Múltiplas falhas no WebSocket check`);
                 await forceReconnect(instanceId, 'WEBSOCKET_FALHAS');
             }
@@ -3511,8 +3511,8 @@ async function instanceRecoveryCheck() {
             // Se tem sessão mas não está conectada há muito tempo, forçar reconexão
             if (session.status !== CONNECTION_STATUS.CONNECTED && session.status !== CONNECTION_STATUS.QR_REQUIRED) {
                 const timeSinceLoad = Date.now() - (session.loadingStartTime || Date.now());
-                // Reduzido para 60 segundos - mais agressivo
-                if (timeSinceLoad > 60000) {
+                // Aumentado para 180 segundos (3 min) - menos agressivo
+                if (timeSinceLoad > 180000) {
                     logger.reconnect(instanceId, `Sessão travada em ${session.status} por ${Math.round(timeSinceLoad/1000)}s - FORÇANDO reconexão`);
                     await forceReconnect(instanceId, 'RECOVERY_TRAVADA');
                     await new Promise(resolve => setTimeout(resolve, 3000));
@@ -3594,11 +3594,11 @@ function startHealthCheck() {
     }, RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
     shutdownHandler.registerInterval(deepHealthCheckInterval);
 
-    // Recovery check a cada 30 SEGUNDOS - ULTRA-AGRESSIVO
+    // Recovery check a cada 60 SEGUNDOS
     // Instâncias enabled=1 NUNCA podem ficar desconectadas
     instanceRecoveryInterval = setInterval(async() => {
         await instanceRecoveryCheck();
-    }, 30000); // 30 segundos - fixo, não configurável
+    }, 60000); // 60 segundos - menos agressivo para evitar falsos positivos
     shutdownHandler.registerInterval(instanceRecoveryInterval);
 
     // Memory check - monitoramento de memória e zumbis
