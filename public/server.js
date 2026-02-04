@@ -605,13 +605,8 @@ async function initDB() {
         pool = mysql.createPool(dbConfig);
         logger.info(null, 'Database pool created');
 
-        // Handler para erros de conexão do pool MySQL
-        pool.on('error', (err) => {
-            logger.error(null, `MySQL Pool Error: ${err.message}`);
-            if (err.code === 'PROTOCOL_CONNECTION_LOST' || err.code === 'ECONNRESET') {
-                logger.warn(null, 'Conexão MySQL perdida. Pool tentará reconectar automaticamente.');
-            }
-        });
+        // Nota: mysql2/promise pools gerenciam reconexão automaticamente
+        // Erros de conexão são tratados nas operações individuais com try/catch
 
         // 0. Criar tabela de instâncias se não existir (com novas colunas de resiliência)
         await pool.execute(`
