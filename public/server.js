@@ -1508,19 +1508,19 @@ async function startSession(instanceId) {
     });
 
     client.on('disconnected', async(reason) => {
-        console.log(`[${instanceId}] ❌ DISCONNECTED - Reason: ${reason}`);
-        await updateInstanceStatus(instanceId, 0);
+        logger.error(instanceId, `DISCONNECTED - Reason: ${reason}`);
+        await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.DISCONNECTED, reason);
 
         // Clean up session
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         let reconnectAttempts = 0;
 
         if (session) {
-            // IMPORTANTE: Limpar TODOS os intervalos
-            clearAllSessionIntervals(session);
+            // IMPORTANTE: Limpar TODOS os intervalos usando o método do SessionState
+            session.clearIntervals();
 
             reconnectAttempts = session.reconnectAttempts || 0;
-            session.status = 'DISCONNECTED';
+            session.setStatus(CONNECTION_STATUS.DISCONNECTED);
             session.client = null;
             session.disconnectReason = reason;
             session.disconnectTime = Date.now();
@@ -1534,69 +1534,72 @@ async function startSession(instanceId) {
             try {
                 await Promise.race([
                     client.destroy(),
-                    new Promise(resolve => setTimeout(resolve, CONNECTION_CONFIG.DESTROY_TIMEOUT))
+                    new Promise(resolve => setTimeout(resolve, RESILIENCE_CONFIG.DESTROY_TIMEOUT))
                 ]);
             } catch (e) {
-                // Ignorar erros de contexto destruído
-                if (!e.message.includes('context') && !e.message.includes('destroyed')) {
-                    console.error(`[${instanceId}] Error destroying client:`, e.message);
+                const errMsg = e && e.message ? e.message : '';
+                if (!errMsg.includes('context') && !errMsg.includes('destroyed')) {
+                    logger.error(instanceId, `Erro ao destruir cliente: ${errMsg}`);
                 }
             }
         }
-        sessions.delete(instanceId);
+        sessionManager.delete(instanceId);
 
-        // ========================================
-        // RECONEXÃO AUTOMÁTICA SEMPRE ATIVA
-        // ========================================
-        const noReconnectReasons = ['LOGOUT', 'TOS_BLOCK', 'SMB_TOS_BLOCK'];
-        const immediateReconnectReasons = ['CONFLICT', 'UNPAIRED', 'NAVIGATION', 'TIMEOUT'];
-        const maxReconnectAttempts = CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS;
+        // ═══════════════════════════════════════════════════════════════════
+        // RECONEXÃO AUTOMÁTICA - ULTRA-AGRESSIVA para instâncias enabled=1
+        // ═══════════════════════════════════════════════════════════════════
 
-        if (noReconnectReasons.includes(reason)) {
-            console.log(`[${instanceId}] ⛔ Reconexão desabilitada para: ${reason}`);
+        // Verificar se deve reconectar baseado na razão
+        if (!shouldReconnect(reason)) {
+            logger.warn(instanceId, `Reconexão desabilitada para: ${reason}`);
+            // Marcar como enabled=0 para não tentar reconectar
+            if (pool) {
+                await pool.execute('UPDATE instances SET enabled = 0 WHERE id = ?', [instanceId]).catch(() => {});
+            }
             return;
         }
 
         // SEMPRE tentar reconectar, resetar contador se atingir máximo
-        if (reconnectAttempts >= maxReconnectAttempts) {
-            console.log(`[${instanceId}] ⚠️ Máximo atingido, resetando contador e tentando novamente...`);
-            reconnectAttempts = 0; // Resetar imediatamente e continuar tentando
+        if (reconnectAttempts >= RESILIENCE_CONFIG.MAX_RECONNECT_ATTEMPTS) {
+            logger.warn(instanceId, 'Máximo atingido, resetando contador e continuando...');
+            reconnectAttempts = 0;
         }
 
-        // Calcular delay com backoff exponencial
-        let delay;
-        if (immediateReconnectReasons.includes(reason)) {
-            // Reconexão rápida para conflitos e navegação
-            delay = 3000 + (reconnectAttempts * 1500); // 3s, 4.5s, 6s...
-        } else {
-            // Backoff exponencial para outros casos (5s, 10s, 20s... max 2 min)
-            const baseDelay = CONNECTION_CONFIG.RECONNECT_BASE_DELAY;
-            delay = Math.min(baseDelay * Math.pow(1.5, reconnectAttempts), 120000);
-        }
+        // Calcular delay com backoff
+        const isImmediate = isImmediateReconnect(reason);
+        const delay = calculateReconnectDelay(reconnectAttempts, isImmediate);
 
-        // Adicionar jitter
-        delay += Math.random() * 2000;
-
-        console.log(`[${instanceId}] 🔄 Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1})`);
+        logger.reconnect(instanceId, `Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1})`);
 
         setTimeout(async() => {
             try {
-                if (!pool) return;
+                if (!pool) {
+                    // Sem banco, tentar reconectar mesmo assim
+                    if (!sessionManager.has(instanceId)) {
+                        const newSession = await startSession(instanceId);
+                        if (newSession) newSession.reconnectAttempts = reconnectAttempts + 1;
+                    }
+                    return;
+                }
 
-                // Verificar se a instância ainda existe no banco
-                const [rows] = await pool.execute('SELECT id FROM instances WHERE id = ?', [instanceId]);
+                // Verificar se a instância está enabled=1 (DEVE reconectar)
+                const [rows] = await pool.execute(
+                    'SELECT id, enabled FROM instances WHERE id = ?', [instanceId]
+                );
 
-                if (rows.length > 0 && !sessions.has(instanceId)) {
-                    console.log(`[${instanceId}] 🔄 Iniciando reconexão automática...`);
+                if (rows.length > 0 && rows[0].enabled === 1 && !sessionManager.has(instanceId)) {
+                    logger.reconnect(instanceId, 'Iniciando reconexão automática (enabled=1)...');
 
-                    // Iniciar sessão e incrementar contador
+                    // Atualizar status para RECONNECTING
+                    await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.RECONNECTING);
+
                     const newSession = await startSession(instanceId);
                     if (newSession) {
                         newSession.reconnectAttempts = reconnectAttempts + 1;
                     }
                 }
             } catch (err) {
-                console.error(`[${instanceId}] Erro na reconexão automática:`, err.message);
+                logger.error(instanceId, `Erro na reconexão automática: ${err.message}`);
             }
         }, delay);
     });
@@ -3459,6 +3462,8 @@ async function deepHealthCheck() {
 // Integrado com memoryMonitor para detectar zumbis e sessões travadas
 async function instanceRecoveryCheck() {
     try {
+        logger.health(null, `Recovery check: ${sessionManager.size} sessões em memória`);
+
         // 1. Detectar e recuperar sessões zumbis via memoryMonitor
         await memoryMonitor.detectZombies();
 
@@ -3472,41 +3477,73 @@ async function instanceRecoveryCheck() {
                 logger.reconnect(instanceId, 'Sessão marcada para reconexão');
                 session.needsReconnect = false;
                 await forceReconnect(instanceId, 'RECOVERY_MARCADA');
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                await new Promise(resolve => setTimeout(resolve, 3000));
                 continue;
             }
 
             // Se tem sessão mas não está conectada há muito tempo, forçar reconexão
             if (session.status !== CONNECTION_STATUS.CONNECTED && session.status !== CONNECTION_STATUS.QR_REQUIRED) {
                 const timeSinceLoad = Date.now() - (session.loadingStartTime || Date.now());
-                if (timeSinceLoad > RESILIENCE_CONFIG.LOADING_TIMEOUT * 2) {
-                    logger.reconnect(instanceId, `Sessão travada em ${session.status} - forçando reconexão`);
+                // Reduzido para 60 segundos - mais agressivo
+                if (timeSinceLoad > 60000) {
+                    logger.reconnect(instanceId, `Sessão travada em ${session.status} por ${Math.round(timeSinceLoad/1000)}s - FORÇANDO reconexão`);
                     await forceReconnect(instanceId, 'RECOVERY_TRAVADA');
-                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    continue;
                 }
             }
 
-            // Se a sessão está DISCONNECTED, tentar reconectar
+            // Se a sessão está DISCONNECTED, reconectar IMEDIATAMENTE
             if (session.status === CONNECTION_STATUS.DISCONNECTED) {
-                logger.reconnect(instanceId, 'Sessão desconectada - tentando reconectar');
-                await startSession(instanceId);
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                logger.reconnect(instanceId, '⚠️ Sessão DISCONNECTED - reconectando IMEDIATAMENTE');
+                await forceReconnect(instanceId, 'DISCONNECTED_RECOVERY');
+                await new Promise(resolve => setTimeout(resolve, 3000));
             }
         }
 
-        // 4. Buscar do banco instâncias com enabled=1 que não estão em memória
+        // CRÍTICO: Buscar TODAS as instâncias enabled=1 do banco e garantir
+        // que estejam ativas. Isso é o WATCHDOG principal.
         if (pool) {
             try {
-                const [rows] = await pool.execute('SELECT id, name FROM instances WHERE enabled = 1');
+                const [rows] = await pool.execute(
+                    'SELECT id, name, connection_status FROM instances WHERE enabled = 1'
+                );
+
                 for (const row of rows) {
-                    if (!sessionManager.has(row.id)) {
-                        logger.reconnect(row.id, `Instância "${row.name}" habilitada sem sessão - iniciando`);
+                    const session = sessionManager.get(row.id);
+
+                    // Caso 1: Instância enabled=1 sem sessão em memória
+                    if (!session) {
+                        logger.reconnect(row.id, `⚠️ WATCHDOG: Instância "${row.name}" enabled=1 SEM sessão - INICIANDO`);
                         await startSession(row.id);
                         await new Promise(resolve => setTimeout(resolve, 3000));
+                        continue;
+                    }
+
+                    // Caso 2: Sessão existe mas está DISCONNECTED
+                    if (session.status === CONNECTION_STATUS.DISCONNECTED) {
+                        logger.reconnect(row.id, `⚠️ WATCHDOG: Instância "${row.name}" DISCONNECTED - FORÇANDO reconexão`);
+                        await forceReconnect(row.id, 'WATCHDOG_DISCONNECTED');
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        continue;
+                    }
+
+                    // Caso 3: Sessão existe mas sem cliente válido
+                    if (!session.client) {
+                        logger.reconnect(row.id, `⚠️ WATCHDOG: Instância "${row.name}" sem cliente - REINICIANDO`);
+                        await forceReconnect(row.id, 'WATCHDOG_NO_CLIENT');
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        continue;
+                    }
+
+                    // Caso 4: Banco diz DISCONNECTED mas memória diz diferente - sincronizar
+                    if (row.connection_status === 'DISCONNECTED' && session.status === CONNECTION_STATUS.CONNECTED) {
+                        logger.session(row.id, 'Sincronizando banco: marcando como CONNECTED');
+                        await updateInstanceStatus(row.id, 1, null, CONNECTION_STATUS.CONNECTED);
                     }
                 }
             } catch (dbErr) {
-                // Banco não disponível, usar apenas sessões em memória
+                logger.error(null, `Erro no watchdog DB: ${dbErr.message}`);
             }
         }
     } catch (err) {
@@ -3530,10 +3567,11 @@ function startHealthCheck() {
     }, RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
     shutdownHandler.registerInterval(deepHealthCheckInterval);
 
-    // Recovery check a cada 1 minuto (mais agressivo)
+    // Recovery check a cada 30 SEGUNDOS - ULTRA-AGRESSIVO
+    // Instâncias enabled=1 NUNCA podem ficar desconectadas
     instanceRecoveryInterval = setInterval(async() => {
         await instanceRecoveryCheck();
-    }, RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL);
+    }, 30000); // 30 segundos - fixo, não configurável
     shutdownHandler.registerInterval(instanceRecoveryInterval);
 
     // Memory check - monitoramento de memória e zumbis
@@ -3545,8 +3583,9 @@ function startHealthCheck() {
     logger.section('SISTEMA DE MONITORAMENTO INICIADO');
     logger.config('Health Check', `${RESILIENCE_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
     logger.config('Deep Check', `${RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
-    logger.config('Recovery Check', `${RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL/1000}s`);
+    logger.config('Recovery Check', '30s (ULTRA-AGRESSIVO)');
     logger.config('Memory Check', `${RESILIENCE_CONFIG.MEMORY_CHECK_INTERVAL/1000}s`);
+    logger.config('Watchdog', 'Instâncias enabled=1 NUNCA ficam desconectadas');
 }
 
 function stopHealthCheck() {
