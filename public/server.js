@@ -30,6 +30,7 @@ const {
 const { sessionManager } = require('./lib/sessionManager');
 const { shutdownHandler } = require('./lib/shutdownHandler');
 const { memoryMonitor } = require('./lib/memoryMonitor');
+const { messageQueue } = require('./lib/messageQueue');
 
 // ========================================
 // ALIAS PARA CONFIGURAÇÕES (compatibilidade)
@@ -1360,10 +1361,10 @@ async function startSession(instanceId) {
     });
 
     client.on('ready', async() => {
-        console.log(`Client ${instanceId} is ready!`);
-        const session = sessions.get(instanceId);
+        logger.session(instanceId, 'Cliente READY - conectado!');
+        const session = sessionManager.get(instanceId);
         if (session) {
-            session.status = 'CONNECTED';
+            session.setStatus(CONNECTION_STATUS.CONNECTED);
             session.qr = null;
             session.lastActivity = Date.now();
             session.reconnectAttempts = 0; // Reset contador de reconexões
@@ -1373,9 +1374,46 @@ async function startSession(instanceId) {
         }
 
         const info = client.info;
-        const phoneNumber = info.wid.user; // Number connected
+        const phoneNumber = info.wid.user;
 
-        await updateInstanceStatus(instanceId, 1, phoneNumber);
+        await updateInstanceStatus(instanceId, 1, phoneNumber, CONNECTION_STATUS.CONNECTED);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PROCESSAR FILA DE MENSAGENS PENDENTES
+        // ═══════════════════════════════════════════════════════════════════
+        const queueSize = messageQueue.getQueueSize(instanceId);
+        if (queueSize > 0) {
+            logger.info(instanceId, `Processando ${queueSize} mensagens pendentes na fila...`);
+
+            // Aguardar 2s para garantir que a conexão está estável
+            setTimeout(async() => {
+                try {
+                    const result = await messageQueue.processQueue(instanceId, async(msg) => {
+                        const chatId = msg.to.includes('@') ? msg.to : `${msg.to}@c.us`;
+
+                        if (msg.type === 'text') {
+                            await client.sendMessage(chatId, msg.content);
+                        } else if (msg.type === 'media') {
+                            const media = await MessageMedia.fromUrl(msg.mediaUrl);
+                            await client.sendMessage(chatId, media, { caption: msg.caption });
+                        }
+
+                        // Salvar no banco
+                        if (pool) {
+                            const phoneNumber = msg.to.replace(/\D/g, '');
+                            await pool.execute(
+                                `INSERT INTO messages (instance_id, to_number, message, type, status, sent_at) 
+                                 VALUES (?, ?, ?, ?, 'sent', NOW())`, [instanceId, phoneNumber, msg.content || msg.caption || '', msg.type]
+                            ).catch(() => {});
+                        }
+                    });
+
+                    logger.info(instanceId, `Fila processada: ${result.processed} enviadas, ${result.failed} falharam`);
+                } catch (err) {
+                    logger.error(instanceId, `Erro ao processar fila: ${err.message}`);
+                }
+            }, 2000);
+        }
     });
 
     client.on('authenticated', () => {
@@ -2159,6 +2197,50 @@ app.get('/api/memory/report', async(req, res) => {
 });
 
 // ========================================
+// API: Fila de Mensagens Pendentes
+// ========================================
+app.get('/api/queue/status', async(req, res) => {
+    try {
+        const stats = messageQueue.getStats();
+        res.json({
+            success: true,
+            ...stats
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/queue/:instanceId', async(req, res) => {
+    const { instanceId } = req.params;
+    try {
+        const queue = messageQueue.getQueue(instanceId);
+        res.json({
+            success: true,
+            instanceId,
+            pending: queue.length,
+            messages: queue
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/queue/:instanceId', async(req, res) => {
+    const { instanceId } = req.params;
+    try {
+        messageQueue.clearQueue(instanceId);
+        logger.info(instanceId, 'Fila de mensagens limpa manualmente');
+        res.json({
+            success: true,
+            message: 'Fila limpa'
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========================================
 // API: Status detalhado de uma instância
 // ========================================
 app.get('/api/instance/:id/details', async(req, res) => {
@@ -2278,32 +2360,48 @@ app.post('/api/agendar-text', async(req, res) => {
 app.post('/api/send-text', async(req, res) => {
     const { instance, to, message, token } = req.body;
 
-    console.log(`[API send-text] Request received for instance: ${instance}, to: ${to}`);
+    logger.info(instance, `[API send-text] Request to: ${to}`);
 
     if (!instance || !to || !message) {
-        console.log('[API send-text] Missing parameters');
         return res.status(400).json({ error: 'Missing parameters' });
     }
 
-    const session = sessions.get(instance);
-    if (!session) {
-        console.log(`[API send-text] Session not found for ${instance}`);
-        return res.status(503).json({ error: 'Instance not active/loaded' });
-    }
+    const session = sessionManager.get(instance);
 
-    if (session.status !== 'CONNECTED' || !session.client) {
-        console.log(`[API send-text] Session ${instance} not connected. Status: ${session.status}`);
-        return res.status(503).json({ error: 'Instance not connected' });
+    // ═══════════════════════════════════════════════════════════════════
+    // SE DESCONECTADO: Enfileirar mensagem e forçar reconexão
+    // ═══════════════════════════════════════════════════════════════════
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
+        logger.warn(instance, `Instância desconectada - enfileirando mensagem para ${to}`);
+
+        const queueResult = messageQueue.enqueue(instance, {
+            type: 'text',
+            to: to,
+            content: message
+        });
+
+        // Forçar reconexão se não estiver já reconectando
+        if (!session || session.status !== CONNECTION_STATUS.RECONNECTING) {
+            forceReconnect(instance, 'MESSAGE_QUEUED').catch(() => {});
+        }
+
+        return res.status(202).json({
+            queued: true,
+            messageId: queueResult.messageId,
+            position: queueResult.position,
+            message: 'Mensagem enfileirada. Instância será reconectada e mensagem enviada automaticamente.',
+            estimatedDelay: '30-60 segundos'
+        });
     }
 
     try {
         const chatId = to.includes('@') ? to : `${to}@c.us`;
-        const phoneNumber = to.replace(/\D/g, ''); // Limpar telefone
+        const phoneNumber = to.replace(/\D/g, '');
 
         const sentMsg = await session.client.sendMessage(chatId, message);
-        console.log(`[API send-text] Message sent successfully. ID: ${sentMsg.id._serialized}`);
+        logger.info(instance, `Mensagem enviada: ${sentMsg.id._serialized}`);
 
-        // Salvar na tabela messages (existente)
+        // Salvar na tabela messages
         if (pool) {
             try {
                 await pool.execute(
@@ -2311,7 +2409,7 @@ app.post('/api/send-text', async(req, res) => {
                      VALUES (?, ?, ?, 'text', 'sent', NOW())`, [instance, phoneNumber, message]
                 );
             } catch (dbErr) {
-                console.error('[API send-text] Error saving message to DB:', dbErr);
+                logger.error(instance, `Erro ao salvar mensagem no DB: ${dbErr.message}`);
             }
         }
 
@@ -2323,7 +2421,25 @@ app.post('/api/send-text', async(req, res) => {
             }
         });
     } catch (error) {
-        console.error(`[API send-text] Error sending message:`, error);
+        logger.error(instance, `Erro ao enviar mensagem: ${error.message}`);
+
+        // Se falhou por desconexão, enfileirar
+        if (error.message.includes('not connected') || error.message.includes('disconnected')) {
+            const queueResult = messageQueue.enqueue(instance, {
+                type: 'text',
+                to: to,
+                content: message
+            });
+
+            forceReconnect(instance, 'SEND_FAILED').catch(() => {});
+
+            return res.status(202).json({
+                queued: true,
+                messageId: queueResult.messageId,
+                message: 'Erro ao enviar. Mensagem enfileirada para reenvio automático.'
+            });
+        }
+
         res.status(500).json({ error: error.message });
     }
 });
