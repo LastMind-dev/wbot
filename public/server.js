@@ -1,4 +1,5 @@
-const { Client, LocalAuth, MessageMedia } = require('./index');
+const { Client, LocalAuth, RemoteAuth, MessageMedia } = require('./index');
+const { MysqlStore } = require('./lib/MysqlStore');
 const express = require('express');
 const mysql = require('mysql2/promise');
 const axios = require('axios');
@@ -214,7 +215,24 @@ app.delete('/api/instance/:id', async(req, res) => {
         const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${id}`);
         if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log(`[${id}] Pasta de sessão deletada`);
+            console.log(`[${id}] Pasta de sessão LocalAuth deletada`);
+        }
+
+        // Tentar deletar pasta de sessão (RemoteAuth)
+        const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${id}`);
+        if (fs.existsSync(remoteSessionPath)) {
+            fs.rmSync(remoteSessionPath, { recursive: true, force: true });
+            console.log(`[${id}] Pasta de sessão RemoteAuth deletada`);
+        }
+
+        // Deletar sessão do banco de dados (RemoteAuth)
+        if (mysqlStore) {
+            try {
+                await mysqlStore.delete({ session: `RemoteAuth-${id}` });
+                console.log(`[${id}] Sessão RemoteAuth deletada do banco de dados`);
+            } catch (storeErr) {
+                console.log(`[${id}] Nenhuma sessão RemoteAuth no banco ou erro: ${storeErr.message}`);
+            }
         }
 
         res.json({ success: true, message: 'Instância deletada com sucesso!' });
@@ -587,6 +605,15 @@ console.log('Password Length:', dbConfig.password ? dbConfig.password.length : 0
 console.log('-----------------------');
 
 let pool;
+let mysqlStore = null;
+
+// ========================================
+// CONFIGURAÇÃO DE AUTENTICAÇÃO
+// ========================================
+// USE_REMOTE_AUTH: true = salva sessão no MySQL (mais confiável)
+//                  false = salva sessão em arquivos locais (padrão antigo)
+const USE_REMOTE_AUTH = process.env.USE_REMOTE_AUTH === 'true' || true; // Ativar RemoteAuth por padrão
+const BACKUP_SYNC_INTERVAL = parseInt(process.env.BACKUP_SYNC_INTERVAL) || 300000; // 5 minutos
 
 // Store active sessions - Usando sessionManager para gerenciamento resiliente
 // Mantendo 'sessions' como alias para compatibilidade
@@ -686,6 +713,37 @@ async function initDB() {
             console.log(`🔑 Senha Gerada: ${randomPassword}`);
             console.log('⚠️  GUARDE ESTA SENHA! ELA NÃO SERÁ EXIBIDA NOVAMENTE.');
             console.log('=============================================================\n');
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // INICIALIZAR MYSQL STORE PARA REMOTEAUTH
+        // ═══════════════════════════════════════════════════════════════
+        if (USE_REMOTE_AUTH) {
+            try {
+                mysqlStore = new MysqlStore({
+                    pool: pool,
+                    tableInfo: {
+                        table: 'wwebjs_sessions',
+                        sessionColumn: 'session_name',
+                        dataColumn: 'data'
+                    }
+                });
+                logger.info(null, '✅ MysqlStore inicializado - sessões serão salvas no banco de dados');
+
+                // Listar sessões existentes no banco
+                const existingSessions = await mysqlStore.listSessions();
+                if (existingSessions.length > 0) {
+                    logger.info(null, `📦 ${existingSessions.length} sessão(ões) encontrada(s) no banco de dados`);
+                    existingSessions.forEach(s => {
+                        logger.info(null, `   - ${s.session}: ${s.sizeMB} MB (atualizada: ${s.updatedAt})`);
+                    });
+                }
+            } catch (storeErr) {
+                logger.error(null, `❌ Erro ao inicializar MysqlStore: ${storeErr.message}`);
+                logger.warn(null, '⚠️ Usando LocalAuth como fallback');
+            }
+        } else {
+            logger.info(null, '📁 Usando LocalAuth - sessões serão salvas em arquivos locais');
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -848,21 +906,52 @@ async function startSession(instanceId) {
     // Atualizar status no banco
     await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.INITIALIZING);
 
-    // Verificar se pasta de sessão existe (persistência)
-    const sessionPath = path.join(RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth'), `session-${instanceId}`);
-    const hasExistingSession = fs.existsSync(sessionPath);
+    // ═══════════════════════════════════════════════════════════════
+    // SELEÇÃO DE ESTRATÉGIA DE AUTENTICAÇÃO
+    // RemoteAuth (MySQL) = mais confiável, sobrevive a reinicializações
+    // LocalAuth (Arquivos) = fallback se MySQL não estiver disponível
+    // ═══════════════════════════════════════════════════════════════
+    let authStrategy;
+    const dataPath = RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth');
 
-    if (hasExistingSession) {
-        logger.session(instanceId, 'Sessão persistente encontrada, restaurando...');
+    if (USE_REMOTE_AUTH && mysqlStore) {
+        // Usar RemoteAuth com MySQL
+        const sessionName = `RemoteAuth-${instanceId}`;
+        const sessionExistsInDB = await mysqlStore.sessionExists({ session: sessionName });
+
+        if (sessionExistsInDB) {
+            logger.session(instanceId, '🔄 Sessão encontrada no banco de dados, restaurando...');
+        } else {
+            logger.session(instanceId, '📱 Nova sessão RemoteAuth, será necessário QR Code');
+        }
+
+        authStrategy = new RemoteAuth({
+            clientId: instanceId,
+            dataPath: dataPath,
+            store: mysqlStore,
+            backupSyncIntervalMs: BACKUP_SYNC_INTERVAL
+        });
+        logger.session(instanceId, `✅ Usando RemoteAuth (MySQL) - backup a cada ${BACKUP_SYNC_INTERVAL/1000}s`);
     } else {
-        logger.session(instanceId, 'Nova sessão, será necessário QR Code');
+        // Fallback para LocalAuth
+        const sessionPath = path.join(dataPath, `session-${instanceId}`);
+        const hasExistingSession = fs.existsSync(sessionPath);
+
+        if (hasExistingSession) {
+            logger.session(instanceId, '📁 Sessão local encontrada, restaurando...');
+        } else {
+            logger.session(instanceId, '📱 Nova sessão LocalAuth, será necessário QR Code');
+        }
+
+        authStrategy = new LocalAuth({
+            clientId: instanceId,
+            dataPath: dataPath
+        });
+        logger.session(instanceId, '📁 Usando LocalAuth (arquivos locais)');
     }
 
     const client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: instanceId,
-            dataPath: RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth')
-        }),
+        authStrategy: authStrategy,
         puppeteer: {
             ...PUPPETEER_CONFIG,
             // CONFIGURAÇÕES ULTRA-OTIMIZADAS PARA ESTABILIDADE
@@ -1954,6 +2043,70 @@ app.get('/api/instances', async(req, res) => {
         });
     } catch (err) {
         console.error('[API instances] Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// API PARA GERENCIAR SESSÕES REMOTEAUTH (MYSQL)
+// ═══════════════════════════════════════════════════════════════
+app.get('/api/sessions/remote', async(req, res) => {
+    try {
+        if (!mysqlStore) {
+            return res.json({
+                enabled: false,
+                message: 'RemoteAuth não está habilitado. USE_REMOTE_AUTH=false ou MysqlStore não inicializado.',
+                sessions: []
+            });
+        }
+
+        const sessions = await mysqlStore.listSessions();
+        res.json({
+            enabled: true,
+            authStrategy: 'RemoteAuth (MySQL)',
+            backupInterval: `${BACKUP_SYNC_INTERVAL / 1000}s`,
+            totalSessions: sessions.length,
+            sessions: sessions
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Deletar uma sessão RemoteAuth específica do banco
+app.delete('/api/sessions/remote/:sessionName', async(req, res) => {
+    try {
+        if (!mysqlStore) {
+            return res.status(400).json({ error: 'RemoteAuth não está habilitado' });
+        }
+
+        const { sessionName } = req.params;
+        await mysqlStore.delete({ session: sessionName });
+
+        res.json({
+            success: true,
+            message: `Sessão "${sessionName}" deletada do banco de dados`
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Limpar sessões antigas do banco
+app.post('/api/sessions/remote/cleanup', async(req, res) => {
+    try {
+        if (!mysqlStore) {
+            return res.status(400).json({ error: 'RemoteAuth não está habilitado' });
+        }
+
+        const { days = 30 } = req.body;
+        const deleted = await mysqlStore.cleanOldSessions(days);
+
+        res.json({
+            success: true,
+            message: `${deleted} sessão(ões) mais antiga(s) que ${days} dias foram removidas`
+        });
+    } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
