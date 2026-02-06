@@ -915,6 +915,16 @@ async function startSession(instanceId) {
     const dataPath = RESILIENCE_CONFIG.SESSION_STORAGE_PATH || path.join(__dirname, '.wwebjs_auth');
 
     if (USE_REMOTE_AUTH && mysqlStore) {
+        // Tentar migrar sessão LocalAuth existente para MySQL (uma única vez)
+        try {
+            const migrated = await mysqlStore.migrateFromLocalAuth(instanceId, dataPath);
+            if (migrated) {
+                logger.session(instanceId, '🔄 Sessão LocalAuth migrada para MySQL com sucesso!');
+            }
+        } catch (migErr) {
+            logger.error(instanceId, `Erro na migração LocalAuth→RemoteAuth: ${migErr.message}`);
+        }
+
         // Usar RemoteAuth com MySQL
         const sessionName = `RemoteAuth-${instanceId}`;
         const sessionExistsInDB = await mysqlStore.sessionExists({ session: sessionName });
@@ -922,7 +932,7 @@ async function startSession(instanceId) {
         if (sessionExistsInDB) {
             logger.session(instanceId, '🔄 Sessão encontrada no banco de dados, restaurando...');
         } else {
-            logger.session(instanceId, '📱 Nova sessão RemoteAuth, será necessário QR Code');
+            logger.session(instanceId, '📱 Nova sessão RemoteAuth - será necessário QR Code (apenas 1 vez)');
         }
 
         authStrategy = new RemoteAuth({
