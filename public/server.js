@@ -33,6 +33,58 @@ const { shutdownHandler } = require('./lib/shutdownHandler');
 const { memoryMonitor } = require('./lib/memoryMonitor');
 const { messageQueue } = require('./lib/messageQueue');
 
+// ========================================
+// VERSÃO DO CÓDIGO (para verificar deploy)
+// ========================================
+const CODE_VERSION = '3.1.0-debug';
+const CODE_BUILD_DATE = '2026-02-07T15:20:00';
+
+// ========================================
+// BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
+// ========================================
+const LOG_BUFFER_MAX = 500;
+const logBuffer = [];
+
+function addToLogBuffer(level, message) {
+    const entry = {
+        time: new Date().toISOString(),
+        level,
+        msg: typeof message === 'string' ? message : String(message)
+    };
+    logBuffer.push(entry);
+    if (logBuffer.length > LOG_BUFFER_MAX) {
+        logBuffer.shift();
+    }
+}
+
+// Interceptar console.log/error/warn para capturar no buffer
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
+const originalConsoleWarn = console.warn.bind(console);
+
+console.log = (...args) => {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    addToLogBuffer('INFO', msg);
+    originalConsoleLog(...args);
+};
+
+console.error = (...args) => {
+    const msg = args.map(a => {
+        if (a instanceof Error) return `${a.message}\n${a.stack}`;
+        if (typeof a === 'object') return JSON.stringify(a);
+        return String(a);
+    }).join(' ');
+    addToLogBuffer('ERROR', msg);
+    originalConsoleError(...args);
+};
+
+console.warn = (...args) => {
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    addToLogBuffer('WARN', msg);
+    originalConsoleWarn(...args);
+};
+
+console.log(`[STARTUP] Code version: ${CODE_VERSION} | Build: ${CODE_BUILD_DATE}`);
 
 // ========================================
 // TRATAMENTO DE ERROS GLOBAIS
@@ -2337,6 +2389,140 @@ app.get('/api/memory/report', async(req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// ========================================
+// API: DIAGNÓSTICO E LOGS (acessível pelo navegador)
+// ========================================
+
+// Ver últimos logs em memória
+app.get('/api/logs', (req, res) => {
+    const level = req.query.level; // filtrar por level: INFO, ERROR, WARN
+    const search = req.query.search; // buscar texto
+    const limit = parseInt(req.query.limit) || 100;
+
+    let logs = [...logBuffer];
+
+    if (level) {
+        logs = logs.filter(l => l.level === level.toUpperCase());
+    }
+    if (search) {
+        const s = search.toLowerCase();
+        logs = logs.filter(l => l.msg.toLowerCase().includes(s));
+    }
+
+    // Retornar os mais recentes
+    logs = logs.slice(-limit);
+
+    res.json({
+        total: logBuffer.length,
+        filtered: logs.length,
+        codeVersion: CODE_VERSION,
+        buildDate: CODE_BUILD_DATE,
+        uptime: Math.round(process.uptime()) + 's',
+        logs
+    });
+});
+
+// Diagnóstico completo do sistema
+app.get('/api/debug', async(req, res) => {
+    const diagnostics = {
+        codeVersion: CODE_VERSION,
+        buildDate: CODE_BUILD_DATE,
+        nodeVersion: process.version,
+        uptime: Math.round(process.uptime()) + 's',
+        uptimeMinutes: Math.round(process.uptime() / 60),
+        memory: {
+            heapUsedMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            heapTotalMB: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+            rssMB: Math.round(process.memoryUsage().rss / 1024 / 1024)
+        },
+        config: {
+            USE_REMOTE_AUTH,
+            BACKUP_SYNC_INTERVAL,
+            mysqlStoreReady: !!mysqlStore,
+            dbConnected: !!pool
+        },
+        sessions: {},
+        database: {},
+        remoteAuthSessions: [],
+        recentErrors: []
+    };
+
+    // 1. Sessões em memória
+    try {
+        for (const [id, session] of sessionManager.entries()) {
+            diagnostics.sessions[id] = {
+                status: session.status,
+                hasClient: !!session.client,
+                hasBrowser: !!(session.client && session.client.pupBrowser && session.client.pupBrowser.isConnected()),
+                hasPage: !!(session.client && session.client.pupPage && !session.client.pupPage.isClosed()),
+                qr: session.qr ? 'present' : null,
+                reconnectAttempts: session.reconnectAttempts || 0,
+                consecutiveFailures: session.consecutiveFailures || 0,
+                lastActivity: session.lastActivity ? new Date(session.lastActivity).toISOString() : null,
+                lastPing: session.lastSuccessfulPing ? new Date(session.lastSuccessfulPing).toISOString() : null,
+                lastSessionSave: session.lastSessionSave ? new Date(session.lastSessionSave).toISOString() : null,
+                disconnectReason: session.disconnectReason || null,
+                isReconnecting: session.isReconnecting || false
+            };
+        }
+    } catch (e) {
+        diagnostics.sessions._error = e.message;
+    }
+
+    // 2. Instâncias no banco de dados
+    if (pool) {
+        try {
+            const [rows] = await pool.execute(
+                'SELECT id, name, status, enabled, connection_status, phone_number, last_connection, disconnect_reason FROM instances'
+            );
+            diagnostics.database.instances = rows.map(r => ({
+                id: r.id,
+                name: r.name,
+                status: r.status,
+                enabled: r.enabled,
+                connectionStatus: r.connection_status,
+                phone: r.phone_number,
+                lastConnection: r.last_connection,
+                disconnectReason: r.disconnect_reason
+            }));
+        } catch (e) {
+            diagnostics.database.instances_error = e.message;
+        }
+
+        // 3. Sessões RemoteAuth no MySQL
+        try {
+            const [sessions] = await pool.execute(
+                `SELECT session_name, LENGTH(data) as data_size, created_at, updated_at FROM wwebjs_sessions`
+            );
+            diagnostics.remoteAuthSessions = sessions.map(s => ({
+                session: s.session_name,
+                sizeMB: (s.data_size / 1024 / 1024).toFixed(2),
+                created: s.created_at,
+                updated: s.updated_at
+            }));
+        } catch (e) {
+            diagnostics.remoteAuthSessions_error = e.message;
+        }
+
+        // 4. Verificar schema da tabela instances
+        try {
+            const [columns] = await pool.execute('SHOW COLUMNS FROM instances');
+            diagnostics.database.schema = columns.map(c => c.Field);
+        } catch (e) {
+            diagnostics.database.schema_error = e.message;
+        }
+    } else {
+        diagnostics.database.error = 'Pool não inicializado';
+    }
+
+    // 5. Erros recentes
+    diagnostics.recentErrors = logBuffer
+        .filter(l => l.level === 'ERROR')
+        .slice(-20);
+
+    res.json(diagnostics);
 });
 
 // ========================================
