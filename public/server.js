@@ -728,6 +728,9 @@ async function initDB() {
                         dataColumn: 'data'
                     }
                 });
+
+                // Aguardar criação da tabela antes de usar
+                await mysqlStore._ready;
                 logger.info(null, '✅ MysqlStore inicializado - sessões serão salvas no banco de dados');
 
                 // Listar sessões existentes no banco

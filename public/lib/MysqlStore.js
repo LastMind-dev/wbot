@@ -11,8 +11,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const archiver = require('archiver');
 const { logger } = require('./logger');
+
+// Lazy require - archiver é opcional, só usado na migração
+let archiver;
+try {
+    archiver = require('archiver');
+} catch (e) {
+    archiver = null;
+}
 
 class MysqlStore {
     /**
@@ -29,14 +36,15 @@ class MysqlStore {
         }
 
         this.pool = options.pool;
+        const ti = options.tableInfo || {};
         this.tableInfo = {
-            table: options.tableInfo ? .table || 'wwebjs_sessions',
-            sessionColumn: options.tableInfo ? .sessionColumn || 'session_name',
-            dataColumn: options.tableInfo ? .dataColumn || 'data'
+            table: ti.table || 'wwebjs_sessions',
+            sessionColumn: ti.sessionColumn || 'session_name',
+            dataColumn: ti.dataColumn || 'data'
         };
 
-        // Inicializar tabela
-        this._initTable();
+        // Inicializar tabela (promise para aguardar antes de usar)
+        this._ready = this._initTable();
     }
 
     /**
@@ -233,6 +241,12 @@ class MysqlStore {
 
             if (!hasRequiredData) {
                 logger.warn(instanceId, `MysqlStore: Pasta LocalAuth não tem dados essenciais (Default/IndexedDB/Local Storage)`);
+                return false;
+            }
+
+            // Verificar se archiver está disponível
+            if (!archiver) {
+                logger.warn(instanceId, `MysqlStore: archiver não instalado, migração não disponível`);
                 return false;
             }
 
