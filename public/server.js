@@ -36,8 +36,8 @@ const { messageQueue } = require('./lib/messageQueue');
 // ========================================
 // VERSÃO DO CÓDIGO (para verificar deploy)
 // ========================================
-const CODE_VERSION = '3.1.0-debug';
-const CODE_BUILD_DATE = '2026-02-07T15:20:00';
+const CODE_VERSION = '3.2.0-qrfix';
+const CODE_BUILD_DATE = '2026-02-07T16:20:00';
 
 // ========================================
 // BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
@@ -145,6 +145,10 @@ const upload = multer({
 });
 
 const app = express();
+
+// Trust proxy - NECESSÁRIO quando atrás de reverse proxy (Plesk/Passenger/Nginx)
+// Sem isso, express-rate-limit não funciona corretamente e gera erros X-Forwarded-For
+app.set('trust proxy', 1);
 
 // 1. Security Headers (Helmet)
 // Desativando CSP por enquanto para permitir scripts/estilos inline existentes
@@ -3906,10 +3910,19 @@ async function instanceRecoveryCheck() {
             }
 
             // Se tem sessão mas não está conectada há muito tempo, forçar reconexão
-            if (session.status !== CONNECTION_STATUS.CONNECTED && session.status !== CONNECTION_STATUS.QR_REQUIRED) {
+            // IMPORTANTE: NÃO reconectar sessões em QR_CODE - o usuário precisa de tempo para escanear
+            // O status real do QR é 'QR_CODE' (não 'QR_REQUIRED' do enum)
+            const skipStatuses = [
+                CONNECTION_STATUS.CONNECTED,
+                CONNECTION_STATUS.QR_REQUIRED,
+                'QR_CODE',
+                CONNECTION_STATUS.RECONNECTING,
+                CONNECTION_STATUS.INITIALIZING
+            ];
+            if (!skipStatuses.includes(session.status)) {
                 const timeSinceLoad = Date.now() - (session.loadingStartTime || Date.now());
-                // Aumentado para 180 segundos (3 min) - menos agressivo
-                if (timeSinceLoad > 180000) {
+                // Aumentado para 300 segundos (5 min) - menos agressivo
+                if (timeSinceLoad > 300000) {
                     logger.reconnect(instanceId, `Sessão travada em ${session.status} por ${Math.round(timeSinceLoad/1000)}s - FORÇANDO reconexão`);
                     await forceReconnect(instanceId, 'RECOVERY_TRAVADA');
                     await new Promise(resolve => setTimeout(resolve, 3000));
