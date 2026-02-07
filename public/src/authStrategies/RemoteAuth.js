@@ -59,6 +59,7 @@ class RemoteAuth extends BaseAuthStrategy {
         this.userDataDir = dirPath;
         this.sessionName = sessionDirName;
 
+        console.log(`[RemoteAuth] ${this.sessionName}: beforeBrowserInitialized - extracting session...`);
         await this.extractRemoteSession();
 
         this.client.options.puppeteer = {
@@ -92,21 +93,16 @@ class RemoteAuth extends BaseAuthStrategy {
          * We must NOT delete the remote session here, only on explicit logout().
          * This preserves the session in MySQL so we can restore it on reconnect
          * without requiring a new QR code scan.
+         * 
+         * NOTE: We intentionally do NOT save the session here because:
+         * - The periodic backup (backupSyncIntervalMs) already keeps MySQL up to date
+         * - During disconnect, the session data may already be invalidated by WhatsApp
+         * - Saving invalid data would overwrite the last known GOOD session in MySQL
          */
-
-        /* Try to save current session before disconnecting (best-effort) */
-        try {
-            const pathExists = await this.isValidPath(this.userDataDir);
-            if (pathExists) {
-                await this.storeRemoteSession();
-            }
-        } catch (e) {
-            /* Ignore save errors during disconnect */
-        }
 
         clearInterval(this.backupSync);
 
-        /* Clean up local files but keep remote session intact */
+        /* Clean up local files but keep remote session intact in MySQL */
         let localPathExists = await this.isValidPath(this.userDataDir);
         if (localPathExists) {
             await fs.promises.rm(this.userDataDir, {
@@ -119,18 +115,23 @@ class RemoteAuth extends BaseAuthStrategy {
 
     async afterAuthReady() {
         const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+        console.log(`[RemoteAuth] ${this.sessionName}: afterAuthReady - sessionExists=${sessionExists}`);
         if (!sessionExists) {
-            await this.delay(20000); /* Initial delay for session to stabilize (reduced from 60s) */
+            console.log(`[RemoteAuth] ${this.sessionName}: First save - waiting 20s for session to stabilize...`);
+            await this.delay(20000);
             await this.storeRemoteSession({ emit: true });
+            console.log(`[RemoteAuth] ${this.sessionName}: First save completed!`);
         } else {
-            /* Session already exists - save updated session after short delay */
+            console.log(`[RemoteAuth] ${this.sessionName}: Session exists - updating in 10s...`);
             await this.delay(10000);
             await this.storeRemoteSession({ emit: true });
+            console.log(`[RemoteAuth] ${this.sessionName}: Session updated!`);
         }
         var self = this;
         this.backupSync = setInterval(async function() {
             await self.storeRemoteSession();
         }, this.backupSyncIntervalMs);
+        console.log(`[RemoteAuth] ${this.sessionName}: Backup interval started (every ${this.backupSyncIntervalMs/1000}s)`);
     }
 
     async storeRemoteSession(options) {
@@ -146,6 +147,8 @@ class RemoteAuth extends BaseAuthStrategy {
                 maxRetries: this.rmMaxRetries,
             }).catch(() => {});
             if (options && options.emit) this.client.emit(Events.REMOTE_SESSION_SAVED);
+        } else {
+            console.log(`[RemoteAuth] ${this.sessionName}: storeRemoteSession skipped - userDataDir not found`);
         }
     }
 
@@ -153,6 +156,9 @@ class RemoteAuth extends BaseAuthStrategy {
         const pathExists = await this.isValidPath(this.userDataDir);
         const compressedSessionPath = `${this.sessionName}.zip`;
         const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+
+        console.log(`[RemoteAuth] ${this.sessionName}: extractRemoteSession - localExists=${pathExists}, dbExists=${sessionExists}`);
+
         if (pathExists) {
             await fs.promises.rm(this.userDataDir, {
                 recursive: true,
@@ -161,9 +167,12 @@ class RemoteAuth extends BaseAuthStrategy {
             }).catch(() => {});
         }
         if (sessionExists) {
+            console.log(`[RemoteAuth] ${this.sessionName}: Restoring session from MySQL...`);
             await this.store.extract({ session: this.sessionName, path: compressedSessionPath });
             await this.unCompressSession(compressedSessionPath);
+            console.log(`[RemoteAuth] ${this.sessionName}: Session restored successfully from MySQL`);
         } else {
+            console.log(`[RemoteAuth] ${this.sessionName}: No session in MySQL - creating empty dir (will need QR code)`);
             fs.mkdirSync(this.userDataDir, { recursive: true });
         }
     }

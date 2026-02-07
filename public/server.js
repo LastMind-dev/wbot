@@ -1552,12 +1552,36 @@ async function startSession(instanceId) {
         }
     });
 
-    client.on('auth_failure', (msg) => {
-        console.error(`Auth failure for ${instanceId}:`, msg);
+    client.on('auth_failure', async(msg) => {
+        console.error(`[${instanceId}] ❌ Auth failure:`, msg);
         const session = sessions.get(instanceId);
         if (session) {
             session.status = 'AUTH_FAILURE';
             session.authFailureReason = msg;
+        }
+
+        // CRÍTICO: Deletar sessão INVÁLIDA do MySQL para evitar loop infinito
+        // Sem isso, toda reconexão restaura a mesma sessão ruim → auth_failure → QR code → repete
+        if (USE_REMOTE_AUTH && mysqlStore) {
+            const sessionName = `RemoteAuth-${instanceId}`;
+            try {
+                const exists = await mysqlStore.sessionExists({ session: sessionName });
+                if (exists) {
+                    await mysqlStore.delete({ session: sessionName });
+                    console.log(`[${instanceId}] 🗑️ Sessão RemoteAuth deletada do MySQL (auth_failure - sessão inválida)`);
+                }
+            } catch (delErr) {
+                console.error(`[${instanceId}] Erro ao deletar sessão após auth_failure:`, delErr.message);
+            }
+        }
+
+        // Limpar pasta local também
+        const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
+        if (fs.existsSync(remoteSessionPath)) {
+            try {
+                fs.rmSync(remoteSessionPath, { recursive: true, force: true });
+                console.log(`[${instanceId}] 🗑️ Pasta RemoteAuth local removida após auth_failure`);
+            } catch (e) {}
         }
     });
 
