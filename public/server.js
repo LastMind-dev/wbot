@@ -613,7 +613,7 @@ let mysqlStore = null;
 // USE_REMOTE_AUTH: true = salva sessão no MySQL (mais confiável)
 //                  false = salva sessão em arquivos locais (padrão antigo)
 const USE_REMOTE_AUTH = process.env.USE_REMOTE_AUTH === 'true' || true; // Ativar RemoteAuth por padrão
-const BACKUP_SYNC_INTERVAL = parseInt(process.env.BACKUP_SYNC_INTERVAL) || 300000; // 5 minutos
+const BACKUP_SYNC_INTERVAL = parseInt(process.env.BACKUP_SYNC_INTERVAL) || 120000; // 2 minutos
 
 // Store active sessions - Usando sessionManager para gerenciamento resiliente
 // Mantendo 'sessions' como alias para compatibilidade
@@ -1597,23 +1597,10 @@ async function startSession(instanceId) {
             session.disconnectReason = reason;
             session.disconnectTime = Date.now();
 
-            // Remover listeners para evitar erros durante destruição
-            try {
-                client.removeAllListeners();
-            } catch (e) {}
-
-            // Destruir cliente com timeout
-            try {
-                await Promise.race([
-                    client.destroy(),
-                    new Promise(resolve => setTimeout(resolve, RESILIENCE_CONFIG.DESTROY_TIMEOUT))
-                ]);
-            } catch (e) {
-                const errMsg = e && e.message ? e.message : '';
-                if (!errMsg.includes('context') && !errMsg.includes('destroyed')) {
-                    logger.error(instanceId, `Erro ao destruir cliente: ${errMsg}`);
-                }
-            }
+            // NÃO chamar client.destroy() aqui - o Client.js da biblioteca já chama
+            // this.destroy() automaticamente após emitir o evento DISCONNECTED.
+            // Chamar destroy() duas vezes causa race conditions e pode interferir
+            // com o salvamento da sessão RemoteAuth no disconnect().
         }
         sessionManager.delete(instanceId);
 
@@ -1936,11 +1923,28 @@ app.post('/api/session/reset', async(req, res) => {
         }
         sessions.delete(instanceId);
 
-        // 2. Remover pasta de sessão
+        // 2. Remover pasta de sessão (LocalAuth)
         const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${instanceId}`);
         if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log(`[RESET] Pasta de sessão removida: ${sessionPath}`);
+            console.log(`[RESET] Pasta de sessão LocalAuth removida: ${sessionPath}`);
+        }
+
+        // 2b. Remover pasta de sessão (RemoteAuth)
+        const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
+        if (fs.existsSync(remoteSessionPath)) {
+            fs.rmSync(remoteSessionPath, { recursive: true, force: true });
+            console.log(`[RESET] Pasta de sessão RemoteAuth removida: ${remoteSessionPath}`);
+        }
+
+        // 2c. Deletar sessão RemoteAuth do MySQL
+        if (mysqlStore) {
+            try {
+                await mysqlStore.delete({ session: `RemoteAuth-${instanceId}` });
+                console.log(`[RESET] Sessão RemoteAuth deletada do MySQL`);
+            } catch (storeErr) {
+                console.log(`[RESET] Nenhuma sessão RemoteAuth no MySQL ou erro: ${storeErr.message}`);
+            }
         }
 
         // 3. Atualizar status no banco
@@ -1975,11 +1979,28 @@ app.post('/api/session/full-reset', async(req, res) => {
         }
         sessions.delete(instanceId);
 
-        // 2. Remover pasta de sessão
+        // 2. Remover pasta de sessão (LocalAuth)
         const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${instanceId}`);
         if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log(`[FULL-RESET] Pasta de sessão removida: ${sessionPath}`);
+            console.log(`[FULL-RESET] Pasta de sessão LocalAuth removida: ${sessionPath}`);
+        }
+
+        // 2b. Remover pasta de sessão (RemoteAuth)
+        const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
+        if (fs.existsSync(remoteSessionPath)) {
+            fs.rmSync(remoteSessionPath, { recursive: true, force: true });
+            console.log(`[FULL-RESET] Pasta de sessão RemoteAuth removida: ${remoteSessionPath}`);
+        }
+
+        // 2c. Deletar sessão RemoteAuth do MySQL
+        if (mysqlStore) {
+            try {
+                await mysqlStore.delete({ session: `RemoteAuth-${instanceId}` });
+                console.log(`[FULL-RESET] Sessão RemoteAuth deletada do MySQL`);
+            } catch (storeErr) {
+                console.log(`[FULL-RESET] Nenhuma sessão RemoteAuth no MySQL ou erro: ${storeErr.message}`);
+            }
         }
 
         // 3. Limpar cache do WhatsApp Web

@@ -36,7 +36,7 @@ class RemoteAuth extends BaseAuthStrategy {
         if (!backupSyncIntervalMs || backupSyncIntervalMs < 60000) {
             throw new Error('Invalid backupSyncIntervalMs. Accepts values starting from 60000ms {1 minute}.');
         }
-        if(!store) throw new Error('Remote database store is required.');
+        if (!store) throw new Error('Remote database store is required.');
 
         this.store = store;
         this.clientId = clientId;
@@ -44,7 +44,7 @@ class RemoteAuth extends BaseAuthStrategy {
         this.dataPath = path.resolve(dataPath || './.wwebjs_auth/');
         this.tempDir = `${this.dataPath}/wwebjs_temp_session_${this.clientId}`;
         this.requiredDirs = ['Default', 'IndexedDB', 'Local Storage']; /* => Required Files & Dirs in WWebJS to restore session */
-        this.rmMaxRetries = rmMaxRetries ?? 4;
+        this.rmMaxRetries = rmMaxRetries ? ? 4;
     }
 
     async beforeBrowserInitialized() {
@@ -68,14 +68,7 @@ class RemoteAuth extends BaseAuthStrategy {
     }
 
     async logout() {
-        await this.disconnect();
-    }
-
-    async destroy() {
-        clearInterval(this.backupSync);
-    }
-
-    async disconnect() {
+        /* Logout = explicit user action, DELETE session from remote store */
         await this.deleteRemoteSession();
 
         let pathExists = await this.isValidPath(this.userDataDir);
@@ -89,14 +82,53 @@ class RemoteAuth extends BaseAuthStrategy {
         clearInterval(this.backupSync);
     }
 
+    async destroy() {
+        clearInterval(this.backupSync);
+    }
+
+    async disconnect() {
+        /* 
+         * IMPORTANT: disconnect() is called on ANY connection loss (network, conflict, etc.)
+         * We must NOT delete the remote session here, only on explicit logout().
+         * This preserves the session in MySQL so we can restore it on reconnect
+         * without requiring a new QR code scan.
+         */
+
+        /* Try to save current session before disconnecting (best-effort) */
+        try {
+            const pathExists = await this.isValidPath(this.userDataDir);
+            if (pathExists) {
+                await this.storeRemoteSession();
+            }
+        } catch (e) {
+            /* Ignore save errors during disconnect */
+        }
+
+        clearInterval(this.backupSync);
+
+        /* Clean up local files but keep remote session intact */
+        let localPathExists = await this.isValidPath(this.userDataDir);
+        if (localPathExists) {
+            await fs.promises.rm(this.userDataDir, {
+                recursive: true,
+                force: true,
+                maxRetries: this.rmMaxRetries,
+            }).catch(() => {});
+        }
+    }
+
     async afterAuthReady() {
-        const sessionExists = await this.store.sessionExists({session: this.sessionName});
-        if(!sessionExists) {
-            await this.delay(60000); /* Initial delay sync required for session to be stable enough to recover */
-            await this.storeRemoteSession({emit: true});
+        const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+        if (!sessionExists) {
+            await this.delay(20000); /* Initial delay for session to stabilize (reduced from 60s) */
+            await this.storeRemoteSession({ emit: true });
+        } else {
+            /* Session already exists - save updated session after short delay */
+            await this.delay(10000);
+            await this.storeRemoteSession({ emit: true });
         }
         var self = this;
-        this.backupSync = setInterval(async function () {
+        this.backupSync = setInterval(async function() {
             await self.storeRemoteSession();
         }, this.backupSyncIntervalMs);
     }
@@ -106,21 +138,21 @@ class RemoteAuth extends BaseAuthStrategy {
         const pathExists = await this.isValidPath(this.userDataDir);
         if (pathExists) {
             await this.compressSession();
-            await this.store.save({session: this.sessionName});
+            await this.store.save({ session: this.sessionName });
             await fs.promises.unlink(`${this.sessionName}.zip`);
             await fs.promises.rm(`${this.tempDir}`, {
                 recursive: true,
                 force: true,
                 maxRetries: this.rmMaxRetries,
             }).catch(() => {});
-            if(options && options.emit) this.client.emit(Events.REMOTE_SESSION_SAVED);
+            if (options && options.emit) this.client.emit(Events.REMOTE_SESSION_SAVED);
         }
     }
 
     async extractRemoteSession() {
         const pathExists = await this.isValidPath(this.userDataDir);
         const compressedSessionPath = `${this.sessionName}.zip`;
-        const sessionExists = await this.store.sessionExists({session: this.sessionName});
+        const sessionExists = await this.store.sessionExists({ session: this.sessionName });
         if (pathExists) {
             await fs.promises.rm(this.userDataDir, {
                 recursive: true,
@@ -129,7 +161,7 @@ class RemoteAuth extends BaseAuthStrategy {
             }).catch(() => {});
         }
         if (sessionExists) {
-            await this.store.extract({session: this.sessionName, path: compressedSessionPath});
+            await this.store.extract({ session: this.sessionName, path: compressedSessionPath });
             await this.unCompressSession(compressedSessionPath);
         } else {
             fs.mkdirSync(this.userDataDir, { recursive: true });
@@ -137,8 +169,8 @@ class RemoteAuth extends BaseAuthStrategy {
     }
 
     async deleteRemoteSession() {
-        const sessionExists = await this.store.sessionExists({session: this.sessionName});
-        if (sessionExists) await this.store.delete({session: this.sessionName});
+        const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+        if (sessionExists) await this.store.delete({ session: this.sessionName });
     }
 
     async compressSession() {
@@ -162,8 +194,8 @@ class RemoteAuth extends BaseAuthStrategy {
         var stream = fs.createReadStream(compressedSessionPath);
         await new Promise((resolve, reject) => {
             stream.pipe(unzipper.Extract({
-                path: this.userDataDir
-            }))
+                    path: this.userDataDir
+                }))
                 .on('error', err => reject(err))
                 .on('finish', () => resolve());
         });
@@ -178,7 +210,7 @@ class RemoteAuth extends BaseAuthStrategy {
                 if (!this.requiredDirs.includes(element)) {
                     const dirElement = path.join(dir, element);
                     const stats = await fs.promises.lstat(dirElement);
-    
+
                     if (stats.isDirectory()) {
                         await fs.promises.rm(dirElement, {
                             recursive: true,
