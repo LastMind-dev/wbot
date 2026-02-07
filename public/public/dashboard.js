@@ -431,9 +431,85 @@ async function deleteInstance(instanceId, name) {
     }
 }
 
+let qrPollingInterval = null;
+let qrRefreshInterval = null;
+
 function showQrCode(instanceId) {
-    document.getElementById('qr-code-container').innerHTML = `<img src="/api/session/qr/${instanceId}" style="max-width: 280px; border-radius: 10px;">`;
+    const container = document.getElementById('qr-code-container');
+    const timestamp = Date.now();
+    container.innerHTML = `
+        <img id="qr-code-image" src="/api/session/qr/${instanceId}?t=${timestamp}" style="max-width: 280px; border-radius: 10px;">
+        <p id="qr-status-text" class="uk-text-center uk-text-muted uk-margin-small-top" style="font-size: 0.85rem;">Aguardando leitura do QR Code...</p>
+    `;
     UIkit.modal('#modal-qr-code').show();
+
+    // Clear previous intervals
+    if (qrPollingInterval) clearInterval(qrPollingInterval);
+    if (qrRefreshInterval) clearInterval(qrRefreshInterval);
+
+    // Poll status every 3 seconds
+    qrPollingInterval = setInterval(async () => {
+        try {
+            const res = await fetch('/api/session/status/' + instanceId + '?t=' + Date.now());
+            const data = await res.json();
+
+            const statusText = document.getElementById('qr-status-text');
+
+            if (data.status === 'CONNECTED') {
+                // SUCCESS - connected!
+                clearInterval(qrPollingInterval);
+                clearInterval(qrRefreshInterval);
+                qrPollingInterval = null;
+                qrRefreshInterval = null;
+
+                if (statusText) {
+                    statusText.innerHTML = '<span class="uk-text-success"><span uk-icon="icon: check; ratio: 0.9"></span> Conectado com sucesso!</span>';
+                }
+
+                // Close modal after brief delay so user sees success
+                setTimeout(() => {
+                    UIkit.modal('#modal-qr-code').hide();
+                    showNotification('WhatsApp conectado com sucesso!', 'success');
+                    loadInstances(); // Refresh table
+                }, 1500);
+
+            } else if (data.status === 'INITIALIZING' || data.status === 'RECONNECTING') {
+                if (statusText) {
+                    statusText.innerHTML = '<span class="uk-text-warning"><span uk-spinner="ratio: 0.5"></span> Autenticando...</span>';
+                }
+            } else if (data.status === 'AUTH_FAILURE') {
+                clearInterval(qrPollingInterval);
+                clearInterval(qrRefreshInterval);
+                qrPollingInterval = null;
+                qrRefreshInterval = null;
+
+                if (statusText) {
+                    statusText.innerHTML = '<span class="uk-text-danger"><span uk-icon="icon: close; ratio: 0.9"></span> Falha na autenticação</span>';
+                }
+                showNotification('Falha na autenticação. Tente novamente.', 'error');
+                loadInstances();
+            }
+        } catch (err) {
+            console.error('QR polling error:', err);
+        }
+    }, 3000);
+
+    // Refresh QR image every 15s (in case it expires)
+    qrRefreshInterval = setInterval(() => {
+        const img = document.getElementById('qr-code-image');
+        if (img) {
+            img.src = '/api/session/qr/' + instanceId + '?t=' + Date.now();
+        }
+    }, 15000);
+
+    // Clean up when modal is closed manually
+    const modal = document.getElementById('modal-qr-code');
+    const cleanupHandler = function() {
+        if (qrPollingInterval) { clearInterval(qrPollingInterval); qrPollingInterval = null; }
+        if (qrRefreshInterval) { clearInterval(qrRefreshInterval); qrRefreshInterval = null; }
+        modal.removeEventListener('hidden', cleanupHandler);
+    };
+    modal.addEventListener('hidden', cleanupHandler);
 }
 
 // ========================================
