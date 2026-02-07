@@ -115,6 +115,11 @@ class RemoteAuth extends BaseAuthStrategy {
 
     async afterAuthReady() {
         console.log(`[RemoteAuth] ${this.sessionName}: >>> afterAuthReady CALLED <<<`);
+        if (this._afterAuthReadyRunning) {
+            console.log(`[RemoteAuth] ${this.sessionName}: afterAuthReady already running, skipping duplicate call`);
+            return;
+        }
+        this._afterAuthReadyRunning = true;
         try {
             console.log(`[RemoteAuth] ${this.sessionName}: store type = ${this.store ? this.store.constructor.name : 'NULL'}`);
             const sessionExists = await this.store.sessionExists({ session: this.sessionName });
@@ -131,6 +136,9 @@ class RemoteAuth extends BaseAuthStrategy {
                 await this.storeRemoteSession({ emit: true });
                 console.log(`[RemoteAuth] ${this.sessionName}: Session updated!`);
             }
+            if (this.backupSync) {
+                clearInterval(this.backupSync);
+            }
             var self = this;
             this.backupSync = setInterval(async function() {
                 try {
@@ -141,6 +149,7 @@ class RemoteAuth extends BaseAuthStrategy {
             }, this.backupSyncIntervalMs);
             console.log(`[RemoteAuth] ${this.sessionName}: Backup interval started (every ${this.backupSyncIntervalMs/1000}s)`);
         } catch (err) {
+            this._afterAuthReadyRunning = false;
             console.error(`[RemoteAuth] ${this.sessionName}: afterAuthReady FATAL ERROR:`, err.message, err.stack);
         }
     }

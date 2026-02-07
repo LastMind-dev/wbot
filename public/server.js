@@ -36,8 +36,8 @@ const { messageQueue } = require('./lib/messageQueue');
 // ========================================
 // VERSÃO DO CÓDIGO (para verificar deploy)
 // ========================================
-const CODE_VERSION = '3.3.0-savefix';
-const CODE_BUILD_DATE = '2026-02-07T16:30:00';
+const CODE_VERSION = '3.4.0-forcesave';
+const CODE_BUILD_DATE = '2026-02-07T18:05:00';
 
 // ========================================
 // BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
@@ -1412,6 +1412,14 @@ async function startSession(instanceId) {
                     }
 
                     startKeepAlive();
+
+                    // Trigger session save (ready event missed, so afterAuthReady wasn't called by Client.js)
+                    if (session.client && session.client.authStrategy) {
+                        console.log(`[${instanceId}] Triggering afterAuthReady from force-connect (change_state)`);
+                        session.client.authStrategy.afterAuthReady().catch(err => {
+                            console.error(`[${instanceId}] afterAuthReady error (force-connect):`, err.message);
+                        });
+                    }
                 }
             } else if (state === 'CONFLICT') {
                 console.log(`[${instanceId}] ⚠️ CONFLICT detectado - tentando takeover...`);
@@ -1580,6 +1588,14 @@ async function startSession(instanceId) {
                             }
 
                             startKeepAlive();
+
+                            // Trigger session save (ready event missed, so afterAuthReady wasn't called by Client.js)
+                            if (currentSession.client && currentSession.client.authStrategy) {
+                                console.log(`[${instanceId}] Triggering afterAuthReady from force-connect (watchdog)`);
+                                currentSession.client.authStrategy.afterAuthReady().catch(err => {
+                                    console.error(`[${instanceId}] afterAuthReady error (watchdog):`, err.message);
+                                });
+                            }
                             return;
                         } else if (state === 'OPENING' || state === 'PAIRING') {
                             console.log(`[${instanceId}] Still syncing (${state}), will check again...`);
