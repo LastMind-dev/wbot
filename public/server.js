@@ -2479,7 +2479,7 @@ app.get('/api/debug', async(req, res) => {
     if (pool) {
         try {
             const [rows] = await pool.execute(
-                'SELECT id, name, status, enabled, connection_status, phone_number, last_connection, disconnect_reason FROM instances'
+                'SELECT id, name, status, enabled, connection_status, phone_number, last_connection, last_disconnect_reason FROM instances'
             );
             diagnostics.database.instances = rows.map(r => ({
                 id: r.id,
@@ -2489,7 +2489,7 @@ app.get('/api/debug', async(req, res) => {
                 connectionStatus: r.connection_status,
                 phone: r.phone_number,
                 lastConnection: r.last_connection,
-                disconnectReason: r.disconnect_reason
+                disconnectReason: r.last_disconnect_reason
             }));
         } catch (e) {
             diagnostics.database.instances_error = e.message;
