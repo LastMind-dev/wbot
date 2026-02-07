@@ -114,41 +114,64 @@ class RemoteAuth extends BaseAuthStrategy {
     }
 
     async afterAuthReady() {
-        const sessionExists = await this.store.sessionExists({ session: this.sessionName });
-        console.log(`[RemoteAuth] ${this.sessionName}: afterAuthReady - sessionExists=${sessionExists}`);
-        if (!sessionExists) {
-            console.log(`[RemoteAuth] ${this.sessionName}: First save - waiting 20s for session to stabilize...`);
-            await this.delay(20000);
-            await this.storeRemoteSession({ emit: true });
-            console.log(`[RemoteAuth] ${this.sessionName}: First save completed!`);
-        } else {
-            console.log(`[RemoteAuth] ${this.sessionName}: Session exists - updating in 10s...`);
-            await this.delay(10000);
-            await this.storeRemoteSession({ emit: true });
-            console.log(`[RemoteAuth] ${this.sessionName}: Session updated!`);
+        console.log(`[RemoteAuth] ${this.sessionName}: >>> afterAuthReady CALLED <<<`);
+        try {
+            console.log(`[RemoteAuth] ${this.sessionName}: store type = ${this.store ? this.store.constructor.name : 'NULL'}`);
+            const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+            console.log(`[RemoteAuth] ${this.sessionName}: afterAuthReady - sessionExists=${sessionExists}`);
+            if (!sessionExists) {
+                console.log(`[RemoteAuth] ${this.sessionName}: First save - waiting 20s for session to stabilize...`);
+                await this.delay(20000);
+                console.log(`[RemoteAuth] ${this.sessionName}: 20s delay done, calling storeRemoteSession...`);
+                await this.storeRemoteSession({ emit: true });
+                console.log(`[RemoteAuth] ${this.sessionName}: First save completed!`);
+            } else {
+                console.log(`[RemoteAuth] ${this.sessionName}: Session exists - updating in 10s...`);
+                await this.delay(10000);
+                await this.storeRemoteSession({ emit: true });
+                console.log(`[RemoteAuth] ${this.sessionName}: Session updated!`);
+            }
+            var self = this;
+            this.backupSync = setInterval(async function() {
+                try {
+                    await self.storeRemoteSession();
+                } catch (backupErr) {
+                    console.error(`[RemoteAuth] ${self.sessionName}: Backup sync error:`, backupErr.message);
+                }
+            }, this.backupSyncIntervalMs);
+            console.log(`[RemoteAuth] ${this.sessionName}: Backup interval started (every ${this.backupSyncIntervalMs/1000}s)`);
+        } catch (err) {
+            console.error(`[RemoteAuth] ${this.sessionName}: afterAuthReady FATAL ERROR:`, err.message, err.stack);
         }
-        var self = this;
-        this.backupSync = setInterval(async function() {
-            await self.storeRemoteSession();
-        }, this.backupSyncIntervalMs);
-        console.log(`[RemoteAuth] ${this.sessionName}: Backup interval started (every ${this.backupSyncIntervalMs/1000}s)`);
     }
 
     async storeRemoteSession(options) {
         /* Compress & Store Session */
+        console.log(`[RemoteAuth] ${this.sessionName}: storeRemoteSession START - checking userDataDir: ${this.userDataDir}`);
         const pathExists = await this.isValidPath(this.userDataDir);
         if (pathExists) {
+            console.log(`[RemoteAuth] ${this.sessionName}: userDataDir EXISTS - compressing...`);
             await this.compressSession();
+            const zipPath = `${this.sessionName}.zip`;
+            const zipExists = await this.isValidPath(zipPath);
+            console.log(`[RemoteAuth] ${this.sessionName}: compression done - zip exists at '${zipPath}': ${zipExists}`);
+            if (!zipExists) {
+                console.error(`[RemoteAuth] ${this.sessionName}: ZIP FILE NOT FOUND after compression! CWD=${process.cwd()}`);
+                return;
+            }
+            console.log(`[RemoteAuth] ${this.sessionName}: calling store.save()...`);
             await this.store.save({ session: this.sessionName });
-            await fs.promises.unlink(`${this.sessionName}.zip`);
+            console.log(`[RemoteAuth] ${this.sessionName}: store.save() completed! Cleaning up...`);
+            await fs.promises.unlink(zipPath).catch(e => console.error(`[RemoteAuth] unlink error: ${e.message}`));
             await fs.promises.rm(`${this.tempDir}`, {
                 recursive: true,
                 force: true,
                 maxRetries: this.rmMaxRetries,
             }).catch(() => {});
             if (options && options.emit) this.client.emit(Events.REMOTE_SESSION_SAVED);
+            console.log(`[RemoteAuth] ${this.sessionName}: storeRemoteSession COMPLETE`);
         } else {
-            console.log(`[RemoteAuth] ${this.sessionName}: storeRemoteSession skipped - userDataDir not found`);
+            console.log(`[RemoteAuth] ${this.sessionName}: storeRemoteSession SKIPPED - userDataDir NOT FOUND: ${this.userDataDir}`);
         }
     }
 

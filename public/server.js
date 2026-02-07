@@ -36,8 +36,8 @@ const { messageQueue } = require('./lib/messageQueue');
 // ========================================
 // VERSÃO DO CÓDIGO (para verificar deploy)
 // ========================================
-const CODE_VERSION = '3.2.0-qrfix';
-const CODE_BUILD_DATE = '2026-02-07T16:20:00';
+const CODE_VERSION = '3.3.0-savefix';
+const CODE_BUILD_DATE = '2026-02-07T16:30:00';
 
 // ========================================
 // BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
