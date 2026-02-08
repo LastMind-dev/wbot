@@ -113,7 +113,7 @@ class Client extends EventEmitter {
         await this.setDeviceName(this.options.deviceName, this.options.browserName);
         const pairWithPhoneNumber = this.options.pairWithPhoneNumber;
         const version = await this.getWWebVersion();
-        const isCometOrAbove = parseInt(version.split('.') ? .[1]) >= 3000;
+        const isCometOrAbove = parseInt((version.split('.') || [])[1]) >= 3000;
 
         if (isCometOrAbove) {
             await this.pupPage.evaluate(ExposeAuthStore);
@@ -782,7 +782,7 @@ class Client extends EventEmitter {
                         const msgKey = reaction.id;
                         const parentMsgKey = reaction.reactionParentKey;
                         const timestamp = reaction.reactionTimestamp / 1000;
-                        const sender = reaction.author ? ? reaction.from;
+                        const sender = reaction.author ?? reaction.from;
                         const senderUserJid = sender._serialized;
 
                         return {...reaction, msgKey, parentMsgKey, senderUserJid, timestamp };
@@ -799,13 +799,13 @@ class Client extends EventEmitter {
                         const msgKey = vote.id;
                         const parentMsgKey = vote.pollUpdateParentKey;
                         const timestamp = vote.t / 1000;
-                        const sender = vote.author ? ? vote.from;
+                        const sender = vote.author ?? vote.from;
                         const senderUserJid = sender._serialized;
 
                         let parentMessage = window.Store.Msg.get(parentMsgKey._serialized);
                         if (!parentMessage) {
                             const fetched = await window.Store.Msg.getMessagesById([parentMsgKey._serialized]);
-                            parentMessage = fetched ? .messages ? .[0] || null;
+                            parentMessage = fetched ?.messages ?.[0] || null;
                         }
 
                         return {
@@ -1264,7 +1264,7 @@ class Client extends EventEmitter {
     async getPinnedMessages(chatId) {
         const pinnedMsgs = await this.pupPage.evaluate(async(chatId) => {
             const chatWid = window.Store.WidFactory.createWid(chatId);
-            const chat = window.Store.Chat.get(chatWid) ? ? await window.Store.Chat.find(chatWid);
+            const chat = window.Store.Chat.get(chatWid) ?? await window.Store.Chat.find(chatWid);
             if (!chat) return [];
 
             const msgs = await window.Store.PinnedMsgUtils.getTable().equals(['chatId'], chatWid.toString());
@@ -1273,13 +1273,12 @@ class Client extends EventEmitter {
                 await Promise.all(
                     msgs.filter(msg => msg.pinType == 1).map(async(msg) => {
                         const res = await window.Store.Msg.getMessagesById([msg.parentMsgKey]);
-                        return res ? .messages ? .[0];
+                        return res ?.messages ?.[0];
                     })
                 )
             ).filter(Boolean);
 
-            return !pinnedMsgs.length ?
-                [] :
+            return !pinnedMsgs.length ? [] :
                 await Promise.all(pinnedMsgs.map((msg) => window.WWebJS.getMessageModel(msg)));
         }, chatId);
 
@@ -1526,7 +1525,7 @@ class Client extends EventEmitter {
      */
     async _muteUnmuteChat(chatId, action, unmuteDateTs) {
         return this.pupPage.evaluate(async(chatId, action, unmuteDateTs) => {
-            const chat = window.Store.Chat.get(chatId) ? ? await window.Store.Chat.find(chatId);
+            const chat = window.Store.Chat.get(chatId) ?? await window.Store.Chat.find(chatId);
             action === 'MUTE' ?
                 await chat.mute.mute({ expiration: unmuteDateTs, sendDevice: true }) :
                 await chat.mute.unmute({ sendDevice: true });
@@ -1725,7 +1724,7 @@ class Client extends EventEmitter {
 
             for (const participant of participants) {
                 const pWid = window.Store.WidFactory.createWid(participant);
-                if ((await window.Store.QueryExist(pWid)) ? .wid) {
+                if ((await window.Store.QueryExist(pWid)) ?.wid) {
                     participantWids.push({ phoneNumber: pWid });
                 } else failedParticipants.push(participant);
             }
@@ -1735,9 +1734,9 @@ class Client extends EventEmitter {
             try {
                 createGroupResult = await window.Store.GroupUtils.createGroup({
                         'addressingModeOverride': 'lid',
-                        'memberAddMode': options.memberAddMode ? ? false,
-                        'membershipApprovalMode': options.membershipApprovalMode ? ? false,
-                        'announce': options.announce ? ? false,
+                        'memberAddMode': options.memberAddMode ?? false,
+                        'membershipApprovalMode': options.membershipApprovalMode ?? false,
+                        'announce': options.announce ?? false,
                         'restrict': options.isRestrict !== undefined ? !options.isRestrict : false,
                         'ephemeralDuration': messageTimer,
                         'parentGroupId': parentGroupWid,
@@ -1979,8 +1978,7 @@ class Client extends EventEmitter {
             limit !== 50 && (window.Store.ChannelUtils.getNewsletterDirectoryPageSize = originalFunction);
 
             return channels ?
-                await Promise.all(channels.map((channel) => window.WWebJS.getChatModel(channel, { isChannel: true }))) :
-                [];
+                await Promise.all(channels.map((channel) => window.WWebJS.getChatModel(channel, { isChannel: true }))) : [];
         }, searchOptions);
     }
 
@@ -2059,7 +2057,7 @@ class Client extends EventEmitter {
             if (!status) return;
 
             const msg =
-                window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId])) ? .messages ? .[0];
+                window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId])) ?.messages ?.[0];
             if (!msg) return;
 
             if (!msg.id.fromMe || !msg.id.remote.isStatus())
@@ -2348,8 +2346,8 @@ class Client extends EventEmitter {
     async syncHistory(chatId) {
         return await this.pupPage.evaluate(async(chatId) => {
             const chatWid = window.Store.WidFactory.createWid(chatId);
-            const chat = window.Store.Chat.get(chatWid) ? ? (await window.Store.Chat.find(chatWid));
-            if (chat ? .endOfHistoryTransferType === 0) {
+            const chat = window.Store.Chat.get(chatWid) ?? (await window.Store.Chat.find(chatWid));
+            if (chat ?.endOfHistoryTransferType === 0) {
                 await window.Store.HistorySync.sendPeerDataOperationRequest(3, {
                     chatId: chat.id
                 });
@@ -2376,7 +2374,7 @@ class Client extends EventEmitter {
 
         return await this.pupPage.evaluate(async(startTimeTs, callType) => {
             const response = await window.Store.ScheduledEventMsgUtils.createEventCallLink(startTimeTs, callType);
-            return response ? ? '';
+            return response ?? '';
         }, startTime, callType);
     }
 
@@ -2390,7 +2388,7 @@ class Client extends EventEmitter {
         if (![0, 1, 2, 3].includes(response)) return false;
 
         return await this.pupPage.evaluate(async(response, msgId) => {
-            const eventMsg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId])) ? .messages ? .[0];
+            const eventMsg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId])) ?.messages ?.[0];
             if (!eventMsg) return false;
 
             await window.Store.ScheduledEventMsgUtils.sendEventResponseMsg(response, eventMsg);
@@ -2444,8 +2442,8 @@ class Client extends EventEmitter {
                 const { lid, phone } = await window.WWebJS.enforceLidAndPnRetrieval(userId);
 
                 return {
-                    lid: lid ? ._serialized,
-                    pn: phone ? ._serialized
+                    lid: lid ?._serialized,
+                    pn: phone ?._serialized
                 };
             }));
         }, userIds);
@@ -2491,7 +2489,7 @@ class Client extends EventEmitter {
                 window.Store.WidToJid.widToUserJid(window.Store.WidFactory.createWid(userId))
             );
 
-            let serialized = note ? .serialize();
+            let serialized = note ?.serialize();
 
             if (!serialized) return null;
 
