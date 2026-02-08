@@ -287,6 +287,8 @@ class Client extends EventEmitter {
         await this.pupPage.evaluate(() => {
             window.AuthStore.AppState.on('change:state', (_AppState, state) => { window.onAuthAppStateChangedEvent(state); });
             window.AuthStore.AppState.on('change:hasSynced', () => { window.onAppStateHasSyncedEvent(); });
+            // Fix race condition: if hasSynced is already true, trigger manually
+            if (window.AuthStore.AppState.hasSynced) { setTimeout(() => window.onAppStateHasSyncedEvent(), 100); }
             window.AuthStore.Cmd.on('offline_progress_update', () => {
                 window.onOfflineProgressUpdateEvent(window.AuthStore.OfflineMessageHandler.getOfflineDeliveryProgress()); 
             });

@@ -3087,6 +3087,9 @@ app.get('/api/group/list/:instance', async(req, res) => {
     }
 
     try {
+        if (typeof session.client.getChats !== 'function') {
+            return res.status(503).json({ error: 'Cliente ainda inicializando. Aguarde alguns segundos e tente novamente.' });
+        }
         const chats = await session.client.getChats();
         const groups = chats.filter(chat => chat.isGroup);
 
