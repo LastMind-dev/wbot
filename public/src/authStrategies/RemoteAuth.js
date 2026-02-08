@@ -184,6 +184,26 @@ class RemoteAuth extends BaseAuthStrategy {
                 console.error(`[RemoteAuth] ${this.sessionName}: ZIP FILE NOT FOUND after compression! CWD=${process.cwd()}`);
                 return;
             }
+
+            /* GUARD: Never save empty/unauthenticated sessions to MySQL.
+             * A valid WhatsApp session is typically 1-3MB compressed.
+             * An empty Chrome profile is only ~0.10MB.
+             * Saving empty data would overwrite a valid session and cause QR loop. */
+            const MIN_SESSION_SIZE_BYTES = 500 * 1024; // 0.5MB minimum
+            try {
+                const zipStats = await fs.promises.stat(zipPath);
+                const sizeMB = (zipStats.size / (1024 * 1024)).toFixed(2);
+                if (zipStats.size < MIN_SESSION_SIZE_BYTES) {
+                    console.log(`[RemoteAuth] ${this.sessionName}: ⚠️ SKIPPING save - session too small (${sizeMB}MB < 0.5MB) - likely empty/unauthenticated`);
+                    await fs.promises.unlink(zipPath).catch(() => {});
+                    return;
+                }
+                console.log(`[RemoteAuth] ${this.sessionName}: Session size OK (${sizeMB}MB) - saving...`);
+            } catch (statErr) {
+                console.error(`[RemoteAuth] ${this.sessionName}: Cannot stat zip: ${statErr.message}`);
+                return;
+            }
+
             console.log(`[RemoteAuth] ${this.sessionName}: calling store.save()...`);
             await this.store.save({ session: this.sessionName });
             console.log(`[RemoteAuth] ${this.sessionName}: store.save() completed! Cleaning up...`);
