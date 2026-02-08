@@ -36,8 +36,8 @@ const { messageQueue } = require('./lib/messageQueue');
 // ========================================
 // VERSÃO DO CÓDIGO (para verificar deploy)
 // ========================================
-const CODE_VERSION = '3.4.0-forcesave';
-const CODE_BUILD_DATE = '2026-02-07T18:05:00';
+const CODE_VERSION = '3.5.0-sessionlock';
+const CODE_BUILD_DATE = '2026-02-08T12:15:00';
 
 // ========================================
 // BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
@@ -950,7 +950,26 @@ async function updateInstanceStatus(instanceId, status, phoneNumber = null, conn
     }
 }
 
+// Lock para evitar startSession() concorrente na mesma instância
+// Sem isso, recovery check + forceReconnect podem criar 2 browsers → CONFLICT → QR_CODE
+const startSessionLocks = new Set();
+
 async function startSession(instanceId) {
+    // LOCK: Impedir chamadas concorrentes para a mesma instância
+    if (startSessionLocks.has(instanceId)) {
+        logger.session(instanceId, 'startSession já em andamento (lock ativo), ignorando chamada duplicada');
+        return sessionManager.get(instanceId) || null;
+    }
+    startSessionLocks.add(instanceId);
+
+    try {
+        return await _startSessionInternal(instanceId);
+    } finally {
+        startSessionLocks.delete(instanceId);
+    }
+}
+
+async function _startSessionInternal(instanceId) {
     // Verificar se já existe sessão ativa
     if (sessionManager.has(instanceId)) {
         const existingSession = sessionManager.get(instanceId);
@@ -3961,9 +3980,13 @@ async function instanceRecoveryCheck() {
                 CONNECTION_STATUS.QR_REQUIRED,
                 'QR_CODE',
                 CONNECTION_STATUS.RECONNECTING,
-                CONNECTION_STATUS.INITIALIZING
+                CONNECTION_STATUS.INITIALIZING,
+                'AUTHENTICATED',
+                'SYNC_TIMEOUT'
             ];
-            if (!skipStatuses.includes(session.status)) {
+            // Também pular status LOADING_* (LOADING_50%, LOADING_100%, etc)
+            const isLoading = session.status && session.status.startsWith('LOADING_');
+            if (!isLoading && !skipStatuses.includes(session.status)) {
                 const timeSinceLoad = Date.now() - (session.loadingStartTime || Date.now());
                 // Aumentado para 300 segundos (5 min) - menos agressivo
                 if (timeSinceLoad > 300000) {
@@ -4048,11 +4071,11 @@ function startHealthCheck() {
     }, RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
     shutdownHandler.registerInterval(deepHealthCheckInterval);
 
-    // Recovery check a cada 60 SEGUNDOS
+    // Recovery check usando intervalo do config (180s)
     // Instâncias enabled=1 NUNCA podem ficar desconectadas
     instanceRecoveryInterval = setInterval(async() => {
         await instanceRecoveryCheck();
-    }, 60000); // 60 segundos - menos agressivo para evitar falsos positivos
+    }, RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL);
     shutdownHandler.registerInterval(instanceRecoveryInterval);
 
     // Memory check - monitoramento de memória e zumbis
@@ -4064,7 +4087,7 @@ function startHealthCheck() {
     logger.section('SISTEMA DE MONITORAMENTO INICIADO');
     logger.config('Health Check', `${RESILIENCE_CONFIG.HEALTH_CHECK_INTERVAL/1000}s`);
     logger.config('Deep Check', `${RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL/1000}s`);
-    logger.config('Recovery Check', '30s (ULTRA-AGRESSIVO)');
+    logger.config('Recovery Check', `${RESILIENCE_CONFIG.RECOVERY_CHECK_INTERVAL/1000}s`);
     logger.config('Memory Check', `${RESILIENCE_CONFIG.MEMORY_CHECK_INTERVAL/1000}s`);
     logger.config('Watchdog', 'Instâncias enabled=1 NUNCA ficam desconectadas');
 }

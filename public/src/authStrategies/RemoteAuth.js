@@ -107,40 +107,19 @@ class RemoteAuth extends BaseAuthStrategy {
          * This preserves the session in MySQL so we can restore it on reconnect
          * without requiring a new QR code scan.
          * 
-         * We TRY to save a final backup before cleanup, but only if local data
-         * looks valid (IndexedDB exists). If save fails, we keep whatever was
-         * last saved in MySQL (the periodic backup).
-         * 
-         * SKIP save when reason is UNPAIRED/UNPAIRED_IDLE - WhatsApp already
-         * invalidated the session, saving would overwrite the last known good backup.
+         * NOTE: We do NOT save during disconnect because:
+         * - On Windows, Chromium locks user data files while running
+         * - Saving locked/partial files would corrupt the MySQL backup
+         * - The periodic backup (backupSyncIntervalMs) keeps MySQL up to date
          */
 
         clearInterval(this.backupSync);
 
-        const isAuthInvalid = reason === 'UNPAIRED' || reason === 'UNPAIRED_IDLE';
-        console.log(`[RemoteAuth] ${this.sessionName}: disconnect called (reason=${reason || 'unknown'}, authInvalid=${isAuthInvalid})`);
+        console.log(`[RemoteAuth] ${this.sessionName}: disconnect called (reason=${reason || 'unknown'})`);
 
+        /* Clean up local files but keep remote session intact in MySQL */
         let localPathExists = await this.isValidPath(this.userDataDir);
         if (localPathExists) {
-            /* Try final save before cleanup - skip if session was invalidated by WhatsApp */
-            if (!isAuthInvalid) {
-                try {
-                    const hasIndexedDB = await this.isValidPath(path.join(this.userDataDir, 'Default', 'IndexedDB'));
-                    if (hasIndexedDB) {
-                        console.log(`[RemoteAuth] ${this.sessionName}: disconnect - saving final backup before cleanup...`);
-                        await this.storeRemoteSession();
-                        console.log(`[RemoteAuth] ${this.sessionName}: disconnect - final backup saved`);
-                    } else {
-                        console.log(`[RemoteAuth] ${this.sessionName}: disconnect - no valid IndexedDB, skipping save`);
-                    }
-                } catch (saveErr) {
-                    console.log(`[RemoteAuth] ${this.sessionName}: disconnect - save failed (keeping last backup): ${saveErr.message}`);
-                }
-            } else {
-                console.log(`[RemoteAuth] ${this.sessionName}: disconnect - skipping save (session invalidated by WhatsApp)`);
-            }
-
-            /* Clean up local files but keep remote session intact in MySQL */
             await fs.promises.rm(this.userDataDir, {
                 recursive: true,
                 force: true,
