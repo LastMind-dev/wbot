@@ -3825,6 +3825,10 @@ async function checkMissingInstances() {
 }
 
 // Deep health check - verificação ULTRA-PROFUNDA
+// TOLERÂNCIA: requer 2 falhas consecutivas antes de forçar reconexão
+// Evita reconexões desnecessárias por estados transientes do WebSocket
+const DEEP_CHECK_MAX_FAILURES = 2;
+
 async function deepHealthCheck() {
     console.log(`[DeepHealthCheck] 🔬 Verificação profunda iniciada...`);
 
@@ -3840,6 +3844,7 @@ async function deepHealthCheck() {
                         storeOk: false,
                         chatOk: false,
                         socketOk: false,
+                        socketState: null,
                         memoryOk: false
                     };
 
@@ -3855,6 +3860,7 @@ async function deepHealthCheck() {
                                 chat: window.Store && typeof window.Store.Chat !== 'undefined',
                                 msg: window.Store && typeof window.Store.Msg !== 'undefined',
                                 socket: window.Store && window.Store.Socket && window.Store.Socket.state === 'CONNECTED',
+                                socketState: window.Store && window.Store.Socket ? window.Store.Socket.state : 'N/A',
                                 conn: window.Store && typeof window.Store.Conn !== 'undefined'
                             };
                         } catch (e) {
@@ -3865,6 +3871,7 @@ async function deepHealthCheck() {
                     checks.storeOk = storeStatus.store;
                     checks.chatOk = storeStatus.chat;
                     checks.socketOk = storeStatus.socket;
+                    checks.socketState = storeStatus.socketState;
 
                     // 3. Verificar memória do browser
                     try {
@@ -3877,29 +3884,47 @@ async function deepHealthCheck() {
 
                     return checks;
                 })(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('DEEP_CHECK_TIMEOUT')), 15000))
+                new Promise((_, reject) => setTimeout(() => reject(new Error('DEEP_CHECK_TIMEOUT')), 20000))
             ]);
 
-            // Avaliar resultado
+            // Avaliar resultado com TOLERÂNCIA a falhas transientes
+            let failReason = null;
+
             if (deepCheck.state !== 'CONNECTED') {
-                console.log(`[DeepHealthCheck] ${instanceId}: 🔴 Estado = ${deepCheck.state}`);
-                await forceReconnect(instanceId, 'DEEP_CHECK_ESTADO_INVALIDO');
+                failReason = `ESTADO_INVALIDO (state=${deepCheck.state})`;
             } else if (!deepCheck.socketOk) {
-                console.log(`[DeepHealthCheck] ${instanceId}: 🔴 WebSocket interno desconectado`);
-                await forceReconnect(instanceId, 'DEEP_CHECK_WEBSOCKET_MORTO');
+                failReason = `WEBSOCKET_NAO_CONECTADO (socketState=${deepCheck.socketState})`;
+            }
+
+            if (failReason) {
+                session.deepCheckFailures = (session.deepCheckFailures || 0) + 1;
+                console.log(`[DeepHealthCheck] ${instanceId}: ⚠️ Falha ${session.deepCheckFailures}/${DEEP_CHECK_MAX_FAILURES}: ${failReason}`);
+
+                if (session.deepCheckFailures >= DEEP_CHECK_MAX_FAILURES) {
+                    console.log(`[DeepHealthCheck] ${instanceId}: 🔴 ${session.deepCheckFailures} falhas consecutivas - reconectando!`);
+                    session.deepCheckFailures = 0;
+                    await forceReconnect(instanceId, `DEEP_CHECK_${failReason}`);
+                }
             } else if (!deepCheck.storeOk || !deepCheck.chatOk) {
-                console.log(`[DeepHealthCheck] ${instanceId}: ⚠️ Store incompleto (store=${deepCheck.storeOk}, chat=${deepCheck.chatOk})`);
-                // Não reconectar, apenas alertar
+                console.log(`[DeepHealthCheck] ${instanceId}: ⚠️ Store incompleto (store=${deepCheck.storeOk}, chat=${deepCheck.chatOk}) - apenas alerta`);
+                // Não reconectar, não contar como falha fatal
             } else {
-                console.log(`[DeepHealthCheck] ${instanceId}: ✅ Operacional (heap: ${deepCheck.heapUsedMB || '?'}MB)`);
+                // Tudo OK - resetar contador de falhas
+                session.deepCheckFailures = 0;
+                console.log(`[DeepHealthCheck] ${instanceId}: ✅ Operacional (heap: ${deepCheck.heapUsedMB || '?'}MB, socket: ${deepCheck.socketState})`);
                 session.lastDeepCheck = Date.now();
                 session.lastSuccessfulPing = Date.now(); // Atualizar ping
             }
         } catch (err) {
-            console.error(`[DeepHealthCheck] ${instanceId}: 🔴 Timeout/Erro: ${err.message}`);
-            // Se der timeout no deep check, a sessão está muito lenta - reconectar
-            if (err.message.includes('TIMEOUT')) {
+            console.error(`[DeepHealthCheck] ${instanceId}: ⚠️ Timeout/Erro: ${err.message}`);
+            session.deepCheckFailures = (session.deepCheckFailures || 0) + 1;
+
+            if (session.deepCheckFailures >= DEEP_CHECK_MAX_FAILURES) {
+                console.log(`[DeepHealthCheck] ${instanceId}: 🔴 ${session.deepCheckFailures} timeouts/erros consecutivos - reconectando!`);
+                session.deepCheckFailures = 0;
                 await forceReconnect(instanceId, 'DEEP_CHECK_TIMEOUT');
+            } else {
+                console.log(`[DeepHealthCheck] ${instanceId}: Falha ${session.deepCheckFailures}/${DEEP_CHECK_MAX_FAILURES}, aguardando próximo check`);
             }
         }
     }

@@ -68,6 +68,19 @@ class RemoteAuth extends BaseAuthStrategy {
         };
     }
 
+    async onAuthenticationNeeded() {
+        const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+        if (sessionExists) {
+            console.log(`[RemoteAuth] ${this.sessionName}: Restored session REJECTED by WhatsApp (UNPAIRED) - deleting stale session from store`);
+            await this.store.delete({ session: this.sessionName }).catch(err => {
+                console.error(`[RemoteAuth] ${this.sessionName}: Error deleting stale session:`, err.message);
+            });
+        } else {
+            console.log(`[RemoteAuth] ${this.sessionName}: No session in store - fresh QR code needed`);
+        }
+        return { failed: false, restart: false, failureEventPayload: undefined };
+    }
+
     async logout() {
         /* Logout = explicit user action, DELETE session from remote store */
         await this.deleteRemoteSession();
@@ -87,24 +100,47 @@ class RemoteAuth extends BaseAuthStrategy {
         clearInterval(this.backupSync);
     }
 
-    async disconnect() {
+    async disconnect(reason) {
         /* 
          * IMPORTANT: disconnect() is called on ANY connection loss (network, conflict, etc.)
          * We must NOT delete the remote session here, only on explicit logout().
          * This preserves the session in MySQL so we can restore it on reconnect
          * without requiring a new QR code scan.
          * 
-         * NOTE: We intentionally do NOT save the session here because:
-         * - The periodic backup (backupSyncIntervalMs) already keeps MySQL up to date
-         * - During disconnect, the session data may already be invalidated by WhatsApp
-         * - Saving invalid data would overwrite the last known GOOD session in MySQL
+         * We TRY to save a final backup before cleanup, but only if local data
+         * looks valid (IndexedDB exists). If save fails, we keep whatever was
+         * last saved in MySQL (the periodic backup).
+         * 
+         * SKIP save when reason is UNPAIRED/UNPAIRED_IDLE - WhatsApp already
+         * invalidated the session, saving would overwrite the last known good backup.
          */
 
         clearInterval(this.backupSync);
 
-        /* Clean up local files but keep remote session intact in MySQL */
+        const isAuthInvalid = reason === 'UNPAIRED' || reason === 'UNPAIRED_IDLE';
+        console.log(`[RemoteAuth] ${this.sessionName}: disconnect called (reason=${reason || 'unknown'}, authInvalid=${isAuthInvalid})`);
+
         let localPathExists = await this.isValidPath(this.userDataDir);
         if (localPathExists) {
+            /* Try final save before cleanup - skip if session was invalidated by WhatsApp */
+            if (!isAuthInvalid) {
+                try {
+                    const hasIndexedDB = await this.isValidPath(path.join(this.userDataDir, 'Default', 'IndexedDB'));
+                    if (hasIndexedDB) {
+                        console.log(`[RemoteAuth] ${this.sessionName}: disconnect - saving final backup before cleanup...`);
+                        await this.storeRemoteSession();
+                        console.log(`[RemoteAuth] ${this.sessionName}: disconnect - final backup saved`);
+                    } else {
+                        console.log(`[RemoteAuth] ${this.sessionName}: disconnect - no valid IndexedDB, skipping save`);
+                    }
+                } catch (saveErr) {
+                    console.log(`[RemoteAuth] ${this.sessionName}: disconnect - save failed (keeping last backup): ${saveErr.message}`);
+                }
+            } else {
+                console.log(`[RemoteAuth] ${this.sessionName}: disconnect - skipping save (session invalidated by WhatsApp)`);
+            }
+
+            /* Clean up local files but keep remote session intact in MySQL */
             await fs.promises.rm(this.userDataDir, {
                 recursive: true,
                 force: true,
@@ -149,8 +185,9 @@ class RemoteAuth extends BaseAuthStrategy {
             }, this.backupSyncIntervalMs);
             console.log(`[RemoteAuth] ${this.sessionName}: Backup interval started (every ${this.backupSyncIntervalMs/1000}s)`);
         } catch (err) {
-            this._afterAuthReadyRunning = false;
             console.error(`[RemoteAuth] ${this.sessionName}: afterAuthReady FATAL ERROR:`, err.message, err.stack);
+        } finally {
+            this._afterAuthReadyRunning = false;
         }
     }
 
