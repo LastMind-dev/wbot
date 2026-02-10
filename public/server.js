@@ -62,8 +62,18 @@ const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
 
+// Stringify seguro: evita explosão com objetos circulares
+function safeStringify(obj) {
+    try {
+        const str = JSON.stringify(obj);
+        return str && str.length > 2000 ? str.substring(0, 2000) + '...[truncated]' : str;
+    } catch (e) {
+        return '[Circular/Unstringifiable Object]';
+    }
+}
+
 console.log = (...args) => {
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    const msg = args.map(a => typeof a === 'object' ? safeStringify(a) : String(a)).join(' ');
     addToLogBuffer('INFO', msg);
     originalConsoleLog(...args);
 };
@@ -71,7 +81,7 @@ console.log = (...args) => {
 console.error = (...args) => {
     const msg = args.map(a => {
         if (a instanceof Error) return `${a.message}\n${a.stack}`;
-        if (typeof a === 'object') return JSON.stringify(a);
+        if (typeof a === 'object') return safeStringify(a);
         return String(a);
     }).join(' ');
     addToLogBuffer('ERROR', msg);
@@ -79,7 +89,7 @@ console.error = (...args) => {
 };
 
 console.warn = (...args) => {
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    const msg = args.map(a => typeof a === 'object' ? safeStringify(a) : String(a)).join(' ');
     addToLogBuffer('WARN', msg);
     originalConsoleWarn(...args);
 };
@@ -176,7 +186,12 @@ app.use(session({
     secret: process.env.JWT_SECRET || 'segredo_padrao_super_seguro',
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 3600000 } // 1 hora
+    cookie: {
+        maxAge: 3600000, // 1 hora
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production'
+    }
 }));
 
 // Rota raiz para verificar se a API está online
@@ -639,10 +654,15 @@ app.get('/admin', requireAuth, async(req, res) => {
 });
 
 // Database Connection
+// Suporta DB_PASSWORD ou DB_PASS (usado no .env.dev)
+const DB_PASSWORD_ENV = process.env.DB_PASSWORD || process.env.DB_PASS;
+if (!DB_PASSWORD_ENV) {
+    console.error('⚠️ AVISO: DB_PASSWORD não definida nas variáveis de ambiente. Configure o .env para produção.');
+}
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'usr_wbot1',
-    password: process.env.DB_PASSWORD || '7Rv4O&2flvuG0utpf',
+    password: DB_PASSWORD_ENV || '',
     database: process.env.DB_NAME || 'tabel_wbot1',
     waitForConnections: true,
     connectionLimit: 10,
@@ -668,7 +688,9 @@ let mysqlStore = null;
 // ========================================
 // USE_REMOTE_AUTH: true = salva sessão no MySQL (mais confiável)
 //                  false = salva sessão em arquivos locais (padrão antigo)
-const USE_REMOTE_AUTH = process.env.USE_REMOTE_AUTH === 'true' || true; // Ativar RemoteAuth por padrão
+const USE_REMOTE_AUTH = process.env.USE_REMOTE_AUTH ?
+    process.env.USE_REMOTE_AUTH === 'true' :
+    true; // Default true, mas pode desligar com USE_REMOTE_AUTH=false
 const BACKUP_SYNC_INTERVAL = parseInt(process.env.BACKUP_SYNC_INTERVAL) || 120000; // 2 minutos
 
 // Store active sessions - Usando sessionManager para gerenciamento resiliente
@@ -954,18 +976,53 @@ async function updateInstanceStatus(instanceId, status, phoneNumber = null, conn
 // Sem isso, recovery check + forceReconnect podem criar 2 browsers → CONFLICT → QR_CODE
 const startSessionLocks = new Set();
 
+// Lock distribuído via MySQL - impede 2 processos (PM2 cluster, restart overlap)
+// de iniciarem a mesma instância simultaneamente
+async function acquireMySQLLock(instanceId, timeoutSec = 5) {
+    if (!pool) return true; // Sem banco, usar apenas lock local
+    try {
+        const [rows] = await pool.execute(
+            'SELECT GET_LOCK(CONCAT(\'wa:\', ?), ?) AS acquired', [instanceId, timeoutSec]
+        );
+        return rows[0].acquired === 1;
+    } catch (e) {
+        logger.error(instanceId, `Erro ao adquirir lock MySQL: ${e.message}`);
+        return true; // Falha no lock não deve impedir start (fallback)
+    }
+}
+
+async function releaseMySQLLock(instanceId) {
+    if (!pool) return;
+    try {
+        await pool.execute(
+            'SELECT RELEASE_LOCK(CONCAT(\'wa:\', ?)) AS released', [instanceId]
+        );
+    } catch (e) {
+        logger.error(instanceId, `Erro ao liberar lock MySQL: ${e.message}`);
+    }
+}
+
 async function startSession(instanceId) {
-    // LOCK: Impedir chamadas concorrentes para a mesma instância
+    // LOCK LOCAL: Impedir chamadas concorrentes no mesmo processo
     if (startSessionLocks.has(instanceId)) {
         logger.session(instanceId, 'startSession já em andamento (lock ativo), ignorando chamada duplicada');
         return sessionManager.get(instanceId) || null;
     }
     startSessionLocks.add(instanceId);
 
+    // LOCK DISTRIBUÍDO: Impedir chamadas concorrentes entre processos (PM2, restart)
+    const gotLock = await acquireMySQLLock(instanceId);
+    if (!gotLock) {
+        logger.warn(instanceId, 'Outro processo já está iniciando esta instância (MySQL lock). Ignorando.');
+        startSessionLocks.delete(instanceId);
+        return sessionManager.get(instanceId) || null;
+    }
+
     try {
         return await _startSessionInternal(instanceId);
     } finally {
         startSessionLocks.delete(instanceId);
+        await releaseMySQLLock(instanceId);
     }
 }
 
@@ -1133,52 +1190,48 @@ async function _startSessionInternal(instanceId) {
         // ========================================
         currentSession.intervals.keepAlive = setInterval(async() => {
             const sess = sessionManager.get(instanceId);
-            if (!sess || !sess.client || sess.status !== CONNECTION_STATUS.CONNECTED) {
-                return;
-            }
-
-            // Evitar operações durante reconexão
-            if (currentSession.isReconnecting) return;
+            if (!sess || !sess.client || sess.status !== CONNECTION_STATUS.CONNECTED) return;
+            if (sess.isReconnecting) return;
 
             try {
                 // Verificar browser e página
-                const browserOk = currentSession.client.pupBrowser && currentSession.client.pupBrowser.isConnected();
-                const pageOk = currentSession.client.pupPage && !currentSession.client.pupPage.isClosed();
+                const browserOk = sess.client.pupBrowser && sess.client.pupBrowser.isConnected();
+                const pageOk = sess.client.pupPage && !sess.client.pupPage.isClosed();
 
                 if (!browserOk) {
                     console.log(`[${instanceId}] 🔴 HEARTBEAT: Browser morto!`);
-                    await handleConnectionLoss(instanceId, 'BROWSER_DEAD');
+                    await forceReconnect(instanceId, 'BROWSER_DEAD');
                     return;
                 }
 
                 if (!pageOk) {
                     console.log(`[${instanceId}] 🔴 HEARTBEAT: Página fechada!`);
-                    await handleConnectionLoss(instanceId, 'PAGE_CLOSED');
+                    await forceReconnect(instanceId, 'PAGE_CLOSED');
                     return;
                 }
 
                 // Ping com timeout e proteção contra erros de contexto
                 const state = await Promise.race([
-                    currentSession.client.getState(),
+                    sess.client.getState(),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), RESILIENCE_CONFIG.STATE_CHECK_TIMEOUT))
                 ]);
 
-                currentSession.lastActivity = Date.now();
-                currentSession.lastPing = Date.now();
-                currentSession.consecutiveFailures = 0;
-                currentSession.lastSuccessfulPing = Date.now();
-                currentSession.contextErrors = 0; // Reset erros de contexto
+                sess.lastActivity = Date.now();
+                sess.lastPing = Date.now();
+                sess.consecutiveFailures = 0;
+                sess.lastSuccessfulPing = Date.now();
+                sess.contextErrors = 0; // Reset erros de contexto
 
                 if (state === 'CONFLICT') {
                     console.log(`[${instanceId}] ⚠️ HEARTBEAT: Conflito - executando takeover...`);
-                    await executeTakeover(currentSession, instanceId);
+                    await executeTakeover(sess, instanceId);
                 } else if (state !== 'CONNECTED') {
                     console.log(`[${instanceId}] ⚠️ HEARTBEAT: Estado anômalo = ${state}`);
-                    currentSession.consecutiveFailures++;
+                    sess.consecutiveFailures++;
                 }
             } catch (err) {
-                const currentSession = sessions.get(instanceId);
-                if (!currentSession) return;
+                const sessNow = sessionManager.get(instanceId);
+                if (!sessNow) return;
 
                 // PROTEÇÃO: Detectar erros de contexto destruído
                 const isContextError = err.message.includes('context') ||
@@ -1187,22 +1240,22 @@ async function _startSessionInternal(instanceId) {
                     err.message.includes('Target closed');
 
                 if (isContextError) {
-                    currentSession.contextErrors = (currentSession.contextErrors || 0) + 1;
-                    console.log(`[${instanceId}] ⚠️ HEARTBEAT: Erro de contexto (${currentSession.contextErrors}/${RESILIENCE_CONFIG.MAX_CONTEXT_ERRORS})`);
+                    sessNow.contextErrors = (sessNow.contextErrors || 0) + 1;
+                    console.log(`[${instanceId}] ⚠️ HEARTBEAT: Erro de contexto (${sessNow.contextErrors}/${RESILIENCE_CONFIG.MAX_CONTEXT_ERRORS})`);
 
-                    if (currentSession.contextErrors >= RESILIENCE_CONFIG.MAX_CONTEXT_ERRORS) {
+                    if (sessNow.contextErrors >= RESILIENCE_CONFIG.MAX_CONTEXT_ERRORS) {
                         console.log(`[${instanceId}] 🔴 Muitos erros de contexto - RECONECTANDO!`);
-                        await handleConnectionLoss(instanceId, 'CONTEXT_ERRORS');
+                        await forceReconnect(instanceId, 'CONTEXT_ERRORS');
                     }
                     return; // Não contar como falha consecutiva normal
                 }
 
                 console.error(`[${instanceId}] 🔴 HEARTBEAT Falhou:`, err.message);
-                currentSession.consecutiveFailures = (currentSession.consecutiveFailures || 0) + 1;
+                sessNow.consecutiveFailures = (sessNow.consecutiveFailures || 0) + 1;
 
-                if (currentSession.consecutiveFailures >= RESILIENCE_CONFIG.MAX_CONSECUTIVE_FAILURES) {
-                    console.log(`[${instanceId}] 🔴 ${currentSession.consecutiveFailures} falhas consecutivas - RECONECTANDO!`);
-                    await handleConnectionLoss(instanceId, 'CONSECUTIVE_HEARTBEAT_FAILURES');
+                if (sessNow.consecutiveFailures >= RESILIENCE_CONFIG.MAX_CONSECUTIVE_FAILURES) {
+                    console.log(`[${instanceId}] 🔴 ${sessNow.consecutiveFailures} falhas consecutivas - RECONECTANDO!`);
+                    await forceReconnect(instanceId, 'CONSECUTIVE_HEARTBEAT_FAILURES');
                 }
             }
         }, RESILIENCE_CONFIG.HEARTBEAT_INTERVAL);
@@ -1211,19 +1264,15 @@ async function _startSessionInternal(instanceId) {
         // 2. VERIFICADOR DE WEBSOCKET SIMPLES
         // ========================================
         currentSession.intervals.websocketCheck = setInterval(async() => {
-            const currentSession = sessions.get(instanceId);
-            if (!currentSession || !currentSession.client || currentSession.status !== 'CONNECTED') {
-                return;
-            }
-            if (currentSession.isReconnecting) return;
+            const sess = sessionManager.get(instanceId);
+            if (!sess || !sess.client || sess.status !== CONNECTION_STATUS.CONNECTED) return;
+            if (sess.isReconnecting) return;
 
             try {
-                if (!currentSession.client.pupPage || currentSession.client.pupPage.isClosed()) {
-                    return;
-                }
+                if (!sess.client.pupPage || sess.client.pupPage.isClosed()) return;
 
                 const wsStatus = await Promise.race([
-                    currentSession.client.pupPage.evaluate(() => {
+                    sess.client.pupPage.evaluate(() => {
                         try {
                             return {
                                 storeExists: typeof window.Store !== 'undefined',
@@ -1238,23 +1287,23 @@ async function _startSessionInternal(instanceId) {
                 ]);
 
                 if (wsStatus.socketState === 'CONNECTED') {
-                    currentSession.wsCheckFailures = 0;
-                    currentSession.lastWsCheck = Date.now();
+                    sess.wsCheckFailures = 0;
+                    sess.lastWsCheck = Date.now();
                 } else if (wsStatus.socketState) {
                     console.log(`[${instanceId}] ⚠️ WS-CHECK: Estado = ${wsStatus.socketState}`);
-                    currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
+                    sess.wsCheckFailures = (sess.wsCheckFailures || 0) + 1;
                 }
 
-                if ((currentSession.wsCheckFailures || 0) >= 6) {
+                if ((sess.wsCheckFailures || 0) >= 6) {
                     console.log(`[${instanceId}] 🔴 WS-CHECK: Muitas falhas - Reconectando...`);
-                    await handleConnectionLoss(instanceId, 'WEBSOCKET_DEAD');
+                    await forceReconnect(instanceId, 'WEBSOCKET_DEAD');
                 }
             } catch (err) {
                 // Ignorar erros de contexto
                 if (!err.message.includes('context') && !err.message.includes('destroyed')) {
-                    const currentSession = sessions.get(instanceId);
-                    if (currentSession) {
-                        currentSession.wsCheckFailures = (currentSession.wsCheckFailures || 0) + 1;
+                    const sessNow = sessionManager.get(instanceId);
+                    if (sessNow) {
+                        sessNow.wsCheckFailures = (sessNow.wsCheckFailures || 0) + 1;
                     }
                 }
             }
@@ -1264,17 +1313,41 @@ async function _startSessionInternal(instanceId) {
         // 3. WATCHDOG DE INATIVIDADE
         // ========================================
         currentSession.intervals.watchdog = setInterval(async() => {
-            const currentSession = sessions.get(instanceId);
-            if (!currentSession || currentSession.status !== 'CONNECTED' || currentSession.isReconnecting) {
-                return;
-            }
+            const sess = sessionManager.get(instanceId);
+            if (!sess || sess.status !== CONNECTION_STATUS.CONNECTED || sess.isReconnecting) return;
 
             const now = Date.now();
-            const timeSinceLastPing = now - (currentSession.lastSuccessfulPing || now);
+            const timeSinceLastPing = now - (sess.lastSuccessfulPing || now);
 
             if (timeSinceLastPing > RESILIENCE_CONFIG.PING_TIMEOUT_THRESHOLD) {
-                console.log(`[${instanceId}] 🔴 WATCHDOG: Sem ping há ${Math.round(timeSinceLastPing/1000)}s`);
-                await handleConnectionLoss(instanceId, 'WATCHDOG_NO_PING');
+                console.log(`[${instanceId}] ⚠️ WATCHDOG: Sem ping há ${Math.round(timeSinceLastPing/1000)}s - tentando checagem leve...`);
+
+                // Segunda checagem leve antes de reconectar
+                try {
+                    const state = await Promise.race([
+                        sess.client.getState(),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), RESILIENCE_CONFIG.STATE_CHECK_TIMEOUT))
+                    ]);
+                    if (state === 'CONNECTED') {
+                        console.log(`[${instanceId}] ✅ WATCHDOG: Checagem leve OK, atualizando ping`);
+                        sess.lastSuccessfulPing = Date.now();
+                        sess.lastActivity = Date.now();
+                        return;
+                    }
+                    // Tentar navigator.onLine como fallback
+                    if (sess.client.pupPage && !sess.client.pupPage.isClosed()) {
+                        const isOnline = await sess.client.pupPage.evaluate(() => navigator.onLine).catch(() => false);
+                        if (isOnline && state === 'CONNECTED') {
+                            sess.lastSuccessfulPing = Date.now();
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    console.log(`[${instanceId}] 🔴 WATCHDOG: Checagem leve falhou: ${e.message}`);
+                }
+
+                console.log(`[${instanceId}] 🔴 WATCHDOG: Confirmado sem resposta - reconectando`);
+                await forceReconnect(instanceId, 'WATCHDOG_NO_PING');
             }
         }, 60000);
 
@@ -1299,81 +1372,10 @@ async function _startSessionInternal(instanceId) {
         }
     };
 
-    // ========================================
-    // FUNÇÃO DE TRATAMENTO DE PERDA DE CONEXÃO (CORRIGIDA)
-    // ========================================
-    const handleConnectionLoss = async(instId, reason) => {
-        const session = sessions.get(instId);
-        if (!session) return;
-
-        // Prevenir múltiplas reconexões simultâneas
-        if (session.isReconnecting) {
-            console.log(`[${instId}] ⏳ Reconexão já em andamento, ignorando: ${reason}`);
-            return;
-        }
-
-        session.isReconnecting = true;
-        console.log(`[${instId}] 🔌 Perda de conexão detectada: ${reason}`);
-
-        // Limpar TODOS os intervalos usando método do SessionState
-        if (typeof session.clearIntervals === 'function') {
-            session.clearIntervals();
-        }
-
-        // Tentar destruir cliente atual com proteção
-        try {
-            if (session.client) {
-                // Remover listeners para evitar eventos durante destruição
-                session.client.removeAllListeners();
-
-                await Promise.race([
-                    session.client.destroy(),
-                    new Promise(resolve => setTimeout(resolve, RESILIENCE_CONFIG.DESTROY_TIMEOUT))
-                ]);
-            }
-        } catch (e) {
-            // Ignorar erros de contexto destruído
-            if (!e.message.includes('context') && !e.message.includes('destroyed')) {
-                console.error(`[${instId}] Erro ao destruir cliente:`, e.message);
-            }
-        }
-
-        sessions.delete(instId);
-        await updateInstanceStatus(instId, 0);
-
-        // Reconectar após delay com backoff
-        const reconnectAttempts = session.reconnectAttempts || 0;
-        const baseDelay = RESILIENCE_CONFIG.RECONNECT_BASE_DELAY;
-        const delay = Math.min(baseDelay * Math.pow(1.5, reconnectAttempts), RESILIENCE_CONFIG.RECONNECT_MAX_DELAY) + (Math.random() * 3000);
-
-        console.log(`[${instId}] 🔄 Reconectando em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1})...`);
-
-        setTimeout(async() => {
-            if (!sessions.has(instId)) {
-                try {
-                    const newSession = await startSession(instId);
-                    if (newSession) {
-                        newSession.reconnectAttempts = reconnectAttempts + 1;
-                        // Resetar contador após conexão bem-sucedida (30 min)
-                        setTimeout(() => {
-                            const s = sessions.get(instId);
-                            if (s && s.status === 'CONNECTED') {
-                                s.reconnectAttempts = 0;
-                                console.log(`[${instId}] ✅ Contador de reconexões resetado`);
-                            }
-                        }, 1800000);
-                    }
-                } catch (err) {
-                    console.error(`[${instId}] Erro na reconexão:`, err.message);
-                }
-            }
-        }, delay);
-    };
-
     // Evento de loading - importante para debug
     client.on('loading_screen', (percent, message) => {
         console.log(`[${instanceId}] Loading: ${percent}% - ${message}`);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.status = `LOADING_${percent}%`;
             session.lastActivity = Date.now();
@@ -1385,7 +1387,7 @@ async function _startSessionInternal(instanceId) {
 
                 // Timeout de 60s após loading 100%
                 setTimeout(async() => {
-                    const currentSession = sessions.get(instanceId);
+                    const currentSession = sessionManager.get(instanceId);
                     if (currentSession && currentSession.status.startsWith('LOADING_')) {
                         console.error(`[${instanceId}] TIMEOUT: Ready event not received after loading 100%`);
                         console.log(`[${instanceId}] Sessão pode estar corrompida. Tente usar o botão Reset.`);
@@ -1399,7 +1401,7 @@ async function _startSessionInternal(instanceId) {
     // Evento de mudança de estado - APRIMORADO
     client.on('change_state', async(state) => {
         console.log(`[${instanceId}] State changed to: ${state}`);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.lastActivity = Date.now();
             session.lastState = state;
@@ -1407,13 +1409,13 @@ async function _startSessionInternal(instanceId) {
             if (state === 'CONNECTED') {
                 // Às vezes o ready não dispara mas o state muda para CONNECTED
                 const needsForceConnect = session.status.startsWith('LOADING_') ||
-                    session.status === 'SYNC_TIMEOUT' ||
+                    session.status === CONNECTION_STATUS.SYNC_TIMEOUT ||
                     session.status === 'AUTHENTICATED' ||
                     session.status === 'SYNC_FAILED';
 
                 if (needsForceConnect) {
                     console.log(`[${instanceId}] State CONNECTED detected (was ${session.status}), forcing ready status`);
-                    session.status = 'CONNECTED';
+                    session.status = CONNECTION_STATUS.CONNECTED;
                     session.qr = null;
                     session.reconnectAttempts = 0; // Reset contador
 
@@ -1456,7 +1458,7 @@ async function _startSessionInternal(instanceId) {
                 }, 2000);
             } else if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
                 console.log(`[${instanceId}] ⚠️ Sessão desemparelhada - necessário novo QR Code`);
-                session.status = 'QR_CODE';
+                session.status = CONNECTION_STATUS.QR_CODE;
             } else if (state === 'OPENING') {
                 console.log(`[${instanceId}] 🔄 Abrindo conexão...`);
             } else if (state === 'PAIRING') {
@@ -1469,10 +1471,10 @@ async function _startSessionInternal(instanceId) {
 
     client.on('qr', (qr) => {
         console.log(`QR Code received for ${instanceId}`);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.qr = qr;
-            session.status = 'QR_CODE';
+            session.status = CONNECTION_STATUS.QR_CODE;
             session.lastActivity = Date.now();
         }
     });
@@ -1535,14 +1537,14 @@ async function _startSessionInternal(instanceId) {
 
     client.on('authenticated', () => {
         console.log(`Client ${instanceId} authenticated`);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.status = 'AUTHENTICATED';
             session.authenticatedAt = Date.now();
 
             // Verificação MUITO agressiva - primeira em 10s, depois a cada 15s
             const checkAuthenticatedState = async(attempt = 1) => {
-                const currentSession = sessions.get(instanceId);
+                const currentSession = sessionManager.get(instanceId);
                 if (!currentSession || currentSession.status !== 'AUTHENTICATED') {
                     return; // Já mudou de estado, parar verificação
                 }
@@ -1579,7 +1581,7 @@ async function _startSessionInternal(instanceId) {
 
                         if (state === 'CONNECTED') {
                             console.log(`[${instanceId}] ✅ Forcing CONNECTED status (ready event missed)`);
-                            currentSession.status = 'CONNECTED';
+                            currentSession.status = CONNECTION_STATUS.CONNECTED;
                             currentSession.qr = null;
 
                             // Tentar injetar Store se necessário
@@ -1631,9 +1633,9 @@ async function _startSessionInternal(instanceId) {
                     setTimeout(() => checkAuthenticatedState(attempt + 1), 15000);
                 } else {
                     console.log(`[${instanceId}] ⚠️ Máximo de tentativas. Status: SYNC_TIMEOUT`);
-                    const sess = sessions.get(instanceId);
+                    const sess = sessionManager.get(instanceId);
                     if (sess && sess.status === 'AUTHENTICATED') {
-                        sess.status = 'SYNC_TIMEOUT';
+                        sess.status = CONNECTION_STATUS.SYNC_TIMEOUT;
                     }
                 }
             };
@@ -1645,9 +1647,9 @@ async function _startSessionInternal(instanceId) {
 
     client.on('auth_failure', async(msg) => {
         console.error(`[${instanceId}] ❌ Auth failure:`, msg);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
-            session.status = 'AUTH_FAILURE';
+            session.status = CONNECTION_STATUS.AUTH_FAILURE;
             session.authFailureReason = msg;
         }
 
@@ -1679,7 +1681,7 @@ async function _startSessionInternal(instanceId) {
     // Handler para quando a sessão remota é salva (importante para persistência)
     client.on('remote_session_saved', () => {
         console.log(`[${instanceId}] 💾 Sessão remota salva`);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.lastSessionSave = Date.now();
         }
@@ -1688,7 +1690,7 @@ async function _startSessionInternal(instanceId) {
     // Handler para chamadas recebidas (mantém a conexão ativa)
     client.on('call', async(call) => {
         console.log(`[${instanceId}] 📞 Chamada recebida de ${call.from}`);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.lastActivity = Date.now();
         }
@@ -1780,7 +1782,7 @@ async function _startSessionInternal(instanceId) {
 
     client.on('message', async msg => {
         // Atualizar última atividade
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
             session.lastActivity = Date.now();
         }
@@ -1802,9 +1804,9 @@ async function _startSessionInternal(instanceId) {
         console.log(`[${instanceId}] client.initialize() completed`);
     } catch (err) {
         console.error(`Failed to initialize client ${instanceId}:`, err);
-        const session = sessions.get(instanceId);
+        const session = sessionManager.get(instanceId);
         if (session) {
-            session.status = 'INIT_ERROR';
+            session.status = CONNECTION_STATUS.INIT_ERROR;
         }
         // Tentar destruir o cliente se existir
         try {
@@ -1812,21 +1814,21 @@ async function _startSessionInternal(instanceId) {
         } catch (destroyErr) {
             console.error(`Error destroying failed client ${instanceId}:`, destroyErr);
         }
-        sessions.delete(instanceId);
+        sessionManager.delete(instanceId);
     }
 
-    return sessions.get(instanceId);
+    return sessionManager.get(instanceId);
 }
 
 async function stopSession(instanceId) {
-    const session = sessions.get(instanceId);
+    const session = sessionManager.get(instanceId);
     if (!session || !session.client) {
         return false;
     }
 
     try {
         await session.client.destroy();
-        sessions.delete(instanceId);
+        sessionManager.delete(instanceId);
         await updateInstanceStatus(instanceId, 0);
         console.log(`Session ${instanceId} stopped`);
         return true;
@@ -2286,10 +2288,10 @@ app.get('/api/health', (req, res) => {
         timestamp: new Date().toISOString(),
         sessions: {
             total: sessions.size,
-            connected: activeSessions.filter(s => s.status === 'CONNECTED').length,
-            initializing: activeSessions.filter(s => s.status === 'INITIALIZING' || s.status.startsWith('LOADING_')).length,
-            disconnected: activeSessions.filter(s => s.status === 'DISCONNECTED').length,
-            qrCode: activeSessions.filter(s => s.status === 'QR_CODE').length,
+            connected: activeSessions.filter(s => s.status === CONNECTION_STATUS.CONNECTED).length,
+            initializing: activeSessions.filter(s => s.status === CONNECTION_STATUS.INITIALIZING || s.status.startsWith('LOADING_')).length,
+            disconnected: activeSessions.filter(s => s.status === CONNECTION_STATUS.DISCONNECTED).length,
+            qrCode: activeSessions.filter(s => s.status === CONNECTION_STATUS.QR_CODE).length,
             list: activeSessions
         },
         memory: {
@@ -2698,7 +2700,7 @@ app.post('/api/agendar-text', async(req, res) => {
         return res.status(503).json({ error: 'Instance not active/loaded' });
     }
 
-    if (session.status !== 'CONNECTED' || !session.client) {
+    if (session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         console.log(`[API] Session ${instance} not connected. Status: ${session.status}`);
         return res.status(503).json({ error: 'Instance not connected' });
     }
@@ -2831,7 +2833,7 @@ app.post('/api/send-media', upload.single('file'), async(req, res) => {
         return res.status(503).json({ error: 'Instance not active/loaded' });
     }
 
-    if (session.status !== 'CONNECTED' || !session.client) {
+    if (session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         console.log(`[API send-media] Session ${instance} not connected. Status: ${session.status}`);
         return res.status(503).json({ error: 'Instância não conectada' });
     }
@@ -2918,7 +2920,7 @@ app.post('/api/agendar-program', async(req, res) => {
         return res.status(503).json({ error: 'Instance not active/loaded' });
     }
 
-    if (session.status !== 'CONNECTED' || !session.client) {
+    if (session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         console.log(`[API agendar-program] Session ${instance} not connected. Status: ${session.status}`);
         return res.status(503).json({ error: 'Instance not connected' });
     }
@@ -3032,7 +3034,7 @@ app.post('/api/group/create', async(req, res) => {
     }
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3101,7 +3103,7 @@ app.get('/api/group/list/:instance', async(req, res) => {
     console.log(`[API Group] Listing groups for instance ${instance}`);
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3138,7 +3140,7 @@ app.get('/api/group/info/:instance/:groupId', async(req, res) => {
     console.log(`[API Group] Getting info for group ${groupId}`);
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3184,7 +3186,7 @@ app.post('/api/group/add-participants', async(req, res) => {
     }
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3259,7 +3261,7 @@ app.post('/api/group/remove-participants', async(req, res) => {
     }
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3300,7 +3302,7 @@ app.post('/api/group/send-message', async(req, res) => {
     }
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3341,7 +3343,7 @@ app.post('/api/group/send-media', upload.single('file'), async(req, res) => {
     }
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3409,7 +3411,7 @@ app.get('/api/group/invite-link/:instance/:groupId', async(req, res) => {
     console.log(`[API Group] Getting invite link for group ${groupId}`);
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3445,7 +3447,7 @@ app.post('/api/group/update', async(req, res) => {
     }
 
     const session = sessions.get(instance);
-    if (!session || session.status !== 'CONNECTED' || !session.client) {
+    if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
         return res.status(503).json({ error: 'Instância não conectada' });
     }
 
@@ -3523,7 +3525,7 @@ app.post('/api/local-groups/create', async(req, res) => {
     try {
         // Primeiro criar o grupo no WhatsApp
         const session = sessions.get(instance);
-        if (!session || session.status !== 'CONNECTED' || !session.client) {
+        if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
             return res.status(503).json({ error: 'Instância não conectada' });
         }
 
@@ -3598,7 +3600,7 @@ app.post('/api/local-groups/add-member', async(req, res) => {
 
         // Adicionar no WhatsApp
         const session = sessions.get(group.instance_id);
-        if (session && session.status === 'CONNECTED' && session.client) {
+        if (session && session.status === CONNECTION_STATUS.CONNECTED && session.client) {
             const chat = await session.client.getChatById(group.group_id);
             if (chat && chat.isGroup) {
                 await chat.addParticipants([`${phoneClean}@c.us`]);
@@ -3671,7 +3673,7 @@ app.post('/api/local-groups/send-message', async(req, res) => {
         const group = groups[0];
 
         const session = sessions.get(group.instance_id);
-        if (!session || session.status !== 'CONNECTED' || !session.client) {
+        if (!session || session.status !== CONNECTION_STATUS.CONNECTED || !session.client) {
             return res.status(503).json({ error: 'Instância não conectada' });
         }
 
@@ -3759,7 +3761,7 @@ async function healthCheck() {
 
             // 4. Verificar inatividade (usando configuração)
             const inactiveTime = now - (session.lastActivity || now);
-            if (session.status === 'CONNECTED' && inactiveTime > RESILIENCE_CONFIG.INACTIVITY_THRESHOLD) {
+            if (session.status === CONNECTION_STATUS.CONNECTED && inactiveTime > RESILIENCE_CONFIG.INACTIVITY_THRESHOLD) {
                 console.log(`[HealthCheck] ${instanceId}: ⚠️ Inativo há ${Math.round(inactiveTime/1000)}s`);
 
                 try {
@@ -3792,7 +3794,7 @@ async function healthCheck() {
             }
 
             // 5. Verificar sessões travadas em LOADING
-            if (session.status.startsWith('LOADING_') || session.status === 'INITIALIZING') {
+            if (session.status.startsWith('LOADING_') || session.status === CONNECTION_STATUS.INITIALIZING) {
                 const loadingTime = now - (session.loadingStartTime || now);
                 if (loadingTime > RESILIENCE_CONFIG.LOADING_TIMEOUT) {
                     console.log(`[HealthCheck] ${instanceId}: 🔴 Travado em ${session.status} há ${Math.round(loadingTime/1000)}s`);
@@ -3801,7 +3803,7 @@ async function healthCheck() {
             }
 
             // 6. Verificar tempo desde último ping bem-sucedido
-            if (session.status === 'CONNECTED' && session.lastSuccessfulPing) {
+            if (session.status === CONNECTION_STATUS.CONNECTED && session.lastSuccessfulPing) {
                 const timeSinceLastPing = now - session.lastSuccessfulPing;
                 if (timeSinceLastPing > RESILIENCE_CONFIG.PING_TIMEOUT_THRESHOLD) {
                     console.log(`[HealthCheck] ${instanceId}: 🔴 Sem ping bem-sucedido há ${Math.round(timeSinceLastPing/1000)}s`);
@@ -3810,7 +3812,7 @@ async function healthCheck() {
             }
 
             // 7. Verificar falhas no WebSocket check (aumentado para 5 falhas - era 2)
-            if (session.status === 'CONNECTED' && (session.wsCheckFailures || 0) >= 5) {
+            if (session.status === CONNECTION_STATUS.CONNECTED && (session.wsCheckFailures || 0) >= 5) {
                 console.log(`[HealthCheck] ${instanceId}: 🔴 Múltiplas falhas no WebSocket check`);
                 await forceReconnect(instanceId, 'WEBSOCKET_FALHAS');
             }
@@ -3852,7 +3854,7 @@ async function deepHealthCheck() {
     console.log(`[DeepHealthCheck] 🔬 Verificação profunda iniciada...`);
 
     for (const [instanceId, session] of sessions.entries()) {
-        if (session.status !== 'CONNECTED' || !session.client) continue;
+        if (session.status !== CONNECTION_STATUS.CONNECTED || !session.client) continue;
 
         try {
             // Verificação completa de operação
