@@ -36,8 +36,8 @@ const { messageQueue } = require('./lib/messageQueue');
 // ========================================
 // VERSÃO DO CÓDIGO (para verificar deploy)
 // ========================================
-const CODE_VERSION = '3.5.0-sessionlock';
-const CODE_BUILD_DATE = '2026-02-08T12:15:00';
+const CODE_VERSION = '3.6.0-lockfix';
+const CODE_BUILD_DATE = '2026-02-10T14:30:00';
 
 // ========================================
 // BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
@@ -978,13 +978,28 @@ const startSessionLocks = new Set();
 
 // Lock distribuído via MySQL - impede 2 processos (PM2 cluster, restart overlap)
 // de iniciarem a mesma instância simultaneamente
+// IMPORTANTE: GET_LOCK/RELEASE_LOCK são per-connection no MySQL.
+// Precisamos usar a MESMA conexão para acquire e release.
+const mysqlLockConnections = new Map(); // instanceId -> connection
+
 async function acquireMySQLLock(instanceId, timeoutSec = 5) {
     if (!pool) return true; // Sem banco, usar apenas lock local
     try {
-        const [rows] = await pool.execute(
+        // Obter uma conexão dedicada do pool para manter o lock
+        const connection = await pool.getConnection();
+        const [rows] = await connection.execute(
             'SELECT GET_LOCK(CONCAT(\'wa:\', ?), ?) AS acquired', [instanceId, timeoutSec]
         );
-        return rows[0].acquired === 1;
+        if (rows[0].acquired === 1) {
+            mysqlLockConnections.set(instanceId, connection);
+            return true;
+        }
+        // Não conseguiu o lock - liberar conexão de volta ao pool
+        connection.release();
+        logger.warn(instanceId, `MySQL lock não adquirido após ${timeoutSec}s - outro processo pode estar iniciando`);
+        // FALLBACK: O lock local (startSessionLocks) já protege contra concorrência
+        // no mesmo processo. Prosseguir mesmo sem o lock MySQL para não travar reconexão.
+        return true;
     } catch (e) {
         logger.error(instanceId, `Erro ao adquirir lock MySQL: ${e.message}`);
         return true; // Falha no lock não deve impedir start (fallback)
@@ -993,12 +1008,17 @@ async function acquireMySQLLock(instanceId, timeoutSec = 5) {
 
 async function releaseMySQLLock(instanceId) {
     if (!pool) return;
+    const connection = mysqlLockConnections.get(instanceId);
+    if (!connection) return;
     try {
-        await pool.execute(
+        await connection.execute(
             'SELECT RELEASE_LOCK(CONCAT(\'wa:\', ?)) AS released', [instanceId]
         );
     } catch (e) {
         logger.error(instanceId, `Erro ao liberar lock MySQL: ${e.message}`);
+    } finally {
+        try { connection.release(); } catch (_) {}
+        mysqlLockConnections.delete(instanceId);
     }
 }
 
@@ -1747,13 +1767,13 @@ async function _startSessionInternal(instanceId) {
 
         logger.reconnect(instanceId, `Reconexão automática em ${Math.round(delay/1000)}s (tentativa ${reconnectAttempts + 1})`);
 
-        setTimeout(async() => {
+        const attemptReconnect = async(attempt) => {
             try {
                 if (!pool) {
                     // Sem banco, tentar reconectar mesmo assim
                     if (!sessionManager.has(instanceId)) {
                         const newSession = await startSession(instanceId);
-                        if (newSession) newSession.reconnectAttempts = reconnectAttempts + 1;
+                        if (newSession) newSession.reconnectAttempts = attempt;
                     }
                     return;
                 }
@@ -1764,20 +1784,32 @@ async function _startSessionInternal(instanceId) {
                 );
 
                 if (rows.length > 0 && rows[0].enabled === 1 && !sessionManager.has(instanceId)) {
-                    logger.reconnect(instanceId, 'Iniciando reconexão automática (enabled=1)...');
+                    logger.reconnect(instanceId, `Iniciando reconexão automática (enabled=1, tentativa ${attempt})...`);
 
                     // Atualizar status para RECONNECTING
                     await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.RECONNECTING);
 
                     const newSession = await startSession(instanceId);
                     if (newSession) {
-                        newSession.reconnectAttempts = reconnectAttempts + 1;
+                        newSession.reconnectAttempts = attempt;
+                    } else {
+                        // startSession retornou null - agendar retry
+                        logger.warn(instanceId, `Reconexão retornou null na tentativa ${attempt}. Retry em 30s...`);
+                        setTimeout(() => attemptReconnect(attempt + 1), 30000);
                     }
                 }
             } catch (err) {
-                logger.error(instanceId, `Erro na reconexão automática: ${err.message}`);
+                logger.error(instanceId, `Erro na reconexão automática (tentativa ${attempt}): ${err.message}`);
+                // Agendar retry após erro
+                if (attempt < RESILIENCE_CONFIG.MAX_RECONNECT_ATTEMPTS) {
+                    const retryDelay = calculateReconnectDelay(attempt, false);
+                    logger.reconnect(instanceId, `Retry após erro em ${Math.round(retryDelay/1000)}s...`);
+                    setTimeout(() => attemptReconnect(attempt + 1), retryDelay);
+                }
             }
-        }, delay);
+        };
+
+        setTimeout(() => attemptReconnect(reconnectAttempts + 1), delay);
     });
 
     client.on('message', async msg => {
@@ -3835,7 +3867,11 @@ async function checkMissingInstances() {
         for (const row of rows) {
             if (!sessionManager.has(row.id)) {
                 logger.health(row.id, `Instância "${row.name}" deveria estar ativa. Iniciando...`);
-                startSession(row.id);
+                try {
+                    await startSession(row.id);
+                } catch (startErr) {
+                    logger.error(row.id, `Erro ao iniciar instância "${row.name}": ${startErr.message}`);
+                }
                 // Aguardar um pouco entre inicializações para não sobrecarregar
                 await new Promise(resolve => setTimeout(resolve, 5000));
             }
