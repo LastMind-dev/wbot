@@ -36,8 +36,8 @@ const { messageQueue } = require('./lib/messageQueue');
 // ========================================
 // VERSÃO DO CÓDIGO (para verificar deploy)
 // ========================================
-const CODE_VERSION = '3.6.0-lockfix';
-const CODE_BUILD_DATE = '2026-02-10T14:30:00';
+const CODE_VERSION = '3.7.0-stability';
+const CODE_BUILD_DATE = '2026-02-10T22:15:00';
 
 // ========================================
 // BUFFER DE LOGS EM MEMÓRIA (acessível via /api/logs)
@@ -869,7 +869,16 @@ async function initDB() {
  * @param {string} instanceId - ID da instância
  * @param {string} reason - Razão da reconexão
  */
+const forceReconnectInProgress = new Set();
+
 async function forceReconnect(instanceId, reason) {
+    // GUARD: Impedir múltiplas reconexões simultâneas para a mesma instância
+    if (forceReconnectInProgress.has(instanceId)) {
+        logger.reconnect(instanceId, `forceReconnect já em andamento, ignorando (reason=${reason})`);
+        return;
+    }
+    forceReconnectInProgress.add(instanceId);
+
     logger.reconnect(instanceId, `Forçando reconexão: ${reason}`);
 
     const session = sessionManager.get(instanceId);
@@ -903,6 +912,9 @@ async function forceReconnect(instanceId, reason) {
     const delay = calculateReconnectDelay(attempts, isImmediate);
 
     logger.reconnect(instanceId, `Reconectando em ${Math.round(delay/1000)}s (tentativa ${attempts + 1})`);
+
+    // Liberar guard imediatamente - o delay + startSessionLocks protegem contra concorrência
+    forceReconnectInProgress.delete(instanceId);
 
     setTimeout(async() => {
         if (!sessionManager.has(instanceId)) {
@@ -1281,56 +1293,14 @@ async function _startSessionInternal(instanceId) {
         }, RESILIENCE_CONFIG.HEARTBEAT_INTERVAL);
 
         // ========================================
-        // 2. VERIFICADOR DE WEBSOCKET SIMPLES
+        // 2. VERIFICADOR DE WEBSOCKET - DESABILITADO
+        // Redundante com heartbeat e causa instabilidade por excesso de pupPage.evaluate()
+        // O heartbeat já verifica getState() que detecta problemas de conexão
         // ========================================
-        currentSession.intervals.websocketCheck = setInterval(async() => {
-            const sess = sessionManager.get(instanceId);
-            if (!sess || !sess.client || sess.status !== CONNECTION_STATUS.CONNECTED) return;
-            if (sess.isReconnecting) return;
-
-            try {
-                if (!sess.client.pupPage || sess.client.pupPage.isClosed()) return;
-
-                const wsStatus = await Promise.race([
-                    sess.client.pupPage.evaluate(() => {
-                        try {
-                            return {
-                                storeExists: typeof window.Store !== 'undefined',
-                                socketState: window.Store && window.Store.Socket ? window.Store.Socket.state : null,
-                                isOnline: navigator.onLine
-                            };
-                        } catch (e) {
-                            return { error: e.message };
-                        }
-                    }),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('WS_TIMEOUT')), 10000))
-                ]);
-
-                if (wsStatus.socketState === 'CONNECTED') {
-                    sess.wsCheckFailures = 0;
-                    sess.lastWsCheck = Date.now();
-                } else if (wsStatus.socketState) {
-                    console.log(`[${instanceId}] ⚠️ WS-CHECK: Estado = ${wsStatus.socketState}`);
-                    sess.wsCheckFailures = (sess.wsCheckFailures || 0) + 1;
-                }
-
-                if ((sess.wsCheckFailures || 0) >= 6) {
-                    console.log(`[${instanceId}] 🔴 WS-CHECK: Muitas falhas - Reconectando...`);
-                    await forceReconnect(instanceId, 'WEBSOCKET_DEAD');
-                }
-            } catch (err) {
-                // Ignorar erros de contexto
-                if (!err.message.includes('context') && !err.message.includes('destroyed')) {
-                    const sessNow = sessionManager.get(instanceId);
-                    if (sessNow) {
-                        sessNow.wsCheckFailures = (sessNow.wsCheckFailures || 0) + 1;
-                    }
-                }
-            }
-        }, RESILIENCE_CONFIG.WEBSOCKET_CHECK_INTERVAL);
 
         // ========================================
-        // 3. WATCHDOG DE INATIVIDADE
+        // 3. WATCHDOG DE INATIVIDADE (simplificado - sem pupPage.evaluate!)
+        // Apenas verifica timestamps, o heartbeat já faz getState()
         // ========================================
         currentSession.intervals.watchdog = setInterval(async() => {
             const sess = sessionManager.get(instanceId);
@@ -1339,37 +1309,12 @@ async function _startSessionInternal(instanceId) {
             const now = Date.now();
             const timeSinceLastPing = now - (sess.lastSuccessfulPing || now);
 
+            // Só reconectar se sem ping por MUITO tempo (o heartbeat já tenta a cada 3min)
             if (timeSinceLastPing > RESILIENCE_CONFIG.PING_TIMEOUT_THRESHOLD) {
-                console.log(`[${instanceId}] ⚠️ WATCHDOG: Sem ping há ${Math.round(timeSinceLastPing/1000)}s - tentando checagem leve...`);
-
-                // Segunda checagem leve antes de reconectar
-                try {
-                    const state = await Promise.race([
-                        sess.client.getState(),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), RESILIENCE_CONFIG.STATE_CHECK_TIMEOUT))
-                    ]);
-                    if (state === 'CONNECTED') {
-                        console.log(`[${instanceId}] ✅ WATCHDOG: Checagem leve OK, atualizando ping`);
-                        sess.lastSuccessfulPing = Date.now();
-                        sess.lastActivity = Date.now();
-                        return;
-                    }
-                    // Tentar navigator.onLine como fallback
-                    if (sess.client.pupPage && !sess.client.pupPage.isClosed()) {
-                        const isOnline = await sess.client.pupPage.evaluate(() => navigator.onLine).catch(() => false);
-                        if (isOnline && state === 'CONNECTED') {
-                            sess.lastSuccessfulPing = Date.now();
-                            return;
-                        }
-                    }
-                } catch (e) {
-                    console.log(`[${instanceId}] 🔴 WATCHDOG: Checagem leve falhou: ${e.message}`);
-                }
-
-                console.log(`[${instanceId}] 🔴 WATCHDOG: Confirmado sem resposta - reconectando`);
+                console.log(`[${instanceId}] 🔴 WATCHDOG: Sem ping há ${Math.round(timeSinceLastPing/1000)}s - reconectando`);
                 await forceReconnect(instanceId, 'WATCHDOG_NO_PING');
             }
-        }, 60000);
+        }, RESILIENCE_CONFIG.HEARTBEAT_INTERVAL * 2); // Roda a cada 2x o heartbeat
 
         console.log(`[${instanceId}] ✅ Sistema de manutenção de conexão ATIVO`);
     };
@@ -1489,6 +1434,11 @@ async function _startSessionInternal(instanceId) {
         }
     });
 
+    // Contador de auth failures consecutivos por instância
+    // Declarado antes dos handlers para ser acessível em ready e auth_failure
+    let authFailureCount = 0;
+    const AUTH_FAILURE_DELETE_THRESHOLD = 3;
+
     client.on('qr', (qr) => {
         console.log(`QR Code received for ${instanceId}`);
         const session = sessionManager.get(instanceId);
@@ -1501,6 +1451,7 @@ async function _startSessionInternal(instanceId) {
 
     client.on('ready', async() => {
         logger.session(instanceId, 'Cliente READY - conectado!');
+        authFailureCount = 0; // Reset auth failures on successful connection
         const session = sessionManager.get(instanceId);
         if (session) {
             session.setStatus(CONNECTION_STATUS.CONNECTED);
@@ -1666,35 +1617,44 @@ async function _startSessionInternal(instanceId) {
     });
 
     client.on('auth_failure', async(msg) => {
-        console.error(`[${instanceId}] ❌ Auth failure:`, msg);
+        authFailureCount++;
+        console.error(`[${instanceId}] ❌ Auth failure (${authFailureCount}/${AUTH_FAILURE_DELETE_THRESHOLD}):`, msg);
         const session = sessionManager.get(instanceId);
         if (session) {
             session.status = CONNECTION_STATUS.AUTH_FAILURE;
             session.authFailureReason = msg;
         }
 
-        // CRÍTICO: Deletar sessão INVÁLIDA do MySQL para evitar loop infinito
-        // Sem isso, toda reconexão restaura a mesma sessão ruim → auth_failure → QR code → repete
-        if (USE_REMOTE_AUTH && mysqlStore) {
-            const sessionName = `RemoteAuth-${instanceId}`;
-            try {
-                const exists = await mysqlStore.sessionExists({ session: sessionName });
-                if (exists) {
-                    await mysqlStore.delete({ session: sessionName });
-                    console.log(`[${instanceId}] 🗑️ Sessão RemoteAuth deletada do MySQL (auth_failure - sessão inválida)`);
-                }
-            } catch (delErr) {
-                console.error(`[${instanceId}] Erro ao deletar sessão após auth_failure:`, delErr.message);
-            }
-        }
+        // Só deletar sessão após múltiplas falhas consecutivas
+        // Isso dá chance para rejeições temporárias do WhatsApp se resolverem
+        if (authFailureCount >= AUTH_FAILURE_DELETE_THRESHOLD) {
+            console.log(`[${instanceId}] 🗑️ ${authFailureCount} auth failures consecutivos - deletando sessão do MySQL`);
 
-        // Limpar pasta local também
-        const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
-        if (fs.existsSync(remoteSessionPath)) {
-            try {
-                fs.rmSync(remoteSessionPath, { recursive: true, force: true });
-                console.log(`[${instanceId}] 🗑️ Pasta RemoteAuth local removida após auth_failure`);
-            } catch (e) {}
+            if (USE_REMOTE_AUTH && mysqlStore) {
+                const sessionName = `RemoteAuth-${instanceId}`;
+                try {
+                    const exists = await mysqlStore.sessionExists({ session: sessionName });
+                    if (exists) {
+                        await mysqlStore.delete({ session: sessionName });
+                        console.log(`[${instanceId}] 🗑️ Sessão RemoteAuth deletada do MySQL (auth_failure persistente)`);
+                    }
+                } catch (delErr) {
+                    console.error(`[${instanceId}] Erro ao deletar sessão após auth_failure:`, delErr.message);
+                }
+            }
+
+            // Limpar pasta local também
+            const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
+            if (fs.existsSync(remoteSessionPath)) {
+                try {
+                    fs.rmSync(remoteSessionPath, { recursive: true, force: true });
+                    console.log(`[${instanceId}] 🗑️ Pasta RemoteAuth local removida após auth_failure persistente`);
+                } catch (e) {}
+            }
+
+            authFailureCount = 0; // Reset após deletar
+        } else {
+            console.log(`[${instanceId}] ⏳ Auth failure temporário - mantendo sessão para retry (${authFailureCount}/${AUTH_FAILURE_DELETE_THRESHOLD})`);
         }
     });
 
@@ -3843,11 +3803,7 @@ async function healthCheck() {
                 }
             }
 
-            // 7. Verificar falhas no WebSocket check (aumentado para 5 falhas - era 2)
-            if (session.status === CONNECTION_STATUS.CONNECTED && (session.wsCheckFailures || 0) >= 5) {
-                console.log(`[HealthCheck] ${instanceId}: 🔴 Múltiplas falhas no WebSocket check`);
-                await forceReconnect(instanceId, 'WEBSOCKET_FALHAS');
-            }
+            // 7. WebSocket check REMOVIDO - desabilitado (era redundante com heartbeat)
 
         } catch (err) {
             console.error(`[HealthCheck] Erro em ${instanceId}:`, err.message);
@@ -4103,11 +4059,15 @@ function startHealthCheck() {
     }, RESILIENCE_CONFIG.HEALTH_CHECK_INTERVAL);
     shutdownHandler.registerInterval(healthCheckInterval);
 
-    // Deep health check
-    deepHealthCheckInterval = setInterval(async() => {
-        await deepHealthCheck();
-    }, RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
-    shutdownHandler.registerInterval(deepHealthCheckInterval);
+    // Deep health check - SOMENTE se habilitado (desabilitado por padrão - causa instabilidade)
+    if (RESILIENCE_CONFIG.ENABLE_DEEP_HEALTH_CHECK) {
+        deepHealthCheckInterval = setInterval(async() => {
+            await deepHealthCheck();
+        }, RESILIENCE_CONFIG.DEEP_HEALTH_CHECK_INTERVAL);
+        shutdownHandler.registerInterval(deepHealthCheckInterval);
+    } else {
+        logger.config('Deep Check', 'DESABILITADO (reduz instabilidade)');
+    }
 
     // Recovery check usando intervalo do config (180s)
     // Instâncias enabled=1 NUNCA podem ficar desconectadas

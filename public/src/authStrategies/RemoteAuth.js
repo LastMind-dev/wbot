@@ -71,10 +71,13 @@ class RemoteAuth extends BaseAuthStrategy {
     async onAuthenticationNeeded() {
         const sessionExists = await this.store.sessionExists({ session: this.sessionName });
         if (sessionExists) {
-            console.log(`[RemoteAuth] ${this.sessionName}: Restored session REJECTED by WhatsApp (UNPAIRED) - deleting stale session from store`);
-            await this.store.delete({ session: this.sessionName }).catch(err => {
-                console.error(`[RemoteAuth] ${this.sessionName}: Error deleting stale session:`, err.message);
-            });
+            // NÃO deletar a sessão aqui! A sessão pode ser válida mas o WhatsApp
+            // rejeitou temporariamente. Deletar causaria perda permanente da sessão
+            // e necessidade de novo QR code. A sessão só é deletada em:
+            // - logout() explícito
+            // - auth_failure no server.js (após múltiplas tentativas)
+            console.log(`[RemoteAuth] ${this.sessionName}: Session exists but WhatsApp needs re-auth. Keeping session in store for retry.`);
+            return { failed: true, restart: true, failureEventPayload: 'Session rejected - will retry with existing session' };
         } else {
             console.log(`[RemoteAuth] ${this.sessionName}: No session in store - fresh QR code needed`);
         }

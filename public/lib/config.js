@@ -42,14 +42,14 @@ const RESILIENCE_CONFIG = {
     // INTERVALOS DE VERIFICAÇÃO (em ms)
     // Valores mais conservadores para evitar desconexões por excesso de checks
     // ═══════════════════════════════════════════════════════════════
-    HEARTBEAT_INTERVAL: 45000, // Ping a cada 45 segundos (mais conservador)
-    WEBSOCKET_CHECK_INTERVAL: 90000, // Verificar WebSocket a cada 90s
-    PRESENCE_UPDATE_INTERVAL: 120000, // Atualizar presença a cada 2 min
-    HEALTH_CHECK_INTERVAL: 90000, // Health check a cada 90s
-    DEEP_HEALTH_CHECK_INTERVAL: 600000, // Deep check a cada 10 min
-    RECOVERY_CHECK_INTERVAL: 180000, // Recovery check a cada 3 min
-    MEMORY_CHECK_INTERVAL: 600000, // Verificar memória a cada 10 min
-    ZOMBIE_CHECK_INTERVAL: 300000, // Verificar zumbis a cada 5 min
+    HEARTBEAT_INTERVAL: 180000, // Ping a cada 3 MINUTOS (era 45s - muito agressivo!)
+    WEBSOCKET_CHECK_INTERVAL: 0, // DESABILITADO - redundante com heartbeat e causa instabilidade
+    PRESENCE_UPDATE_INTERVAL: 0, // DESABILITADO - WhatsApp detecta automação
+    HEALTH_CHECK_INTERVAL: 300000, // Health check a cada 5 MIN (era 90s)
+    DEEP_HEALTH_CHECK_INTERVAL: 1800000, // Deep check a cada 30 MIN (era 10min)
+    RECOVERY_CHECK_INTERVAL: 300000, // Recovery check a cada 5 MIN (era 3min)
+    MEMORY_CHECK_INTERVAL: 900000, // Verificar memória a cada 15 min (era 10min)
+    ZOMBIE_CHECK_INTERVAL: 600000, // Verificar zumbis a cada 10 min (era 5min)
 
     // ═══════════════════════════════════════════════════════════════
     // TIMEOUTS (em ms)
@@ -64,7 +64,7 @@ const RESILIENCE_CONFIG = {
     // LIMITES DE RECONEXÃO
     // ═══════════════════════════════════════════════════════════════
     MAX_RECONNECT_ATTEMPTS: 20, // Máximo de tentativas antes de pausar
-    MAX_CONSECUTIVE_FAILURES: 5, // Falhas antes de forçar reconexão (era 3 - muito sensível)
+    MAX_CONSECUTIVE_FAILURES: 10, // Falhas antes de forçar reconexão (era 5 - ainda sensível)
     RECONNECT_RESET_AFTER: 1800000, // Reset contador após 30 min conectado
 
     // ═══════════════════════════════════════════════════════════════
@@ -79,17 +79,17 @@ const RESILIENCE_CONFIG = {
     // THRESHOLDS (em ms)
     // Valores mais tolerantes para evitar falsos positivos
     // ═══════════════════════════════════════════════════════════════
-    INACTIVITY_THRESHOLD: 600000, // 10 min sem atividade = problema
+    INACTIVITY_THRESHOLD: 900000, // 15 min sem atividade = problema (era 10min)
     LOADING_TIMEOUT: 300000, // 5 min máximo em loading
-    PING_TIMEOUT_THRESHOLD: 300000, // 5 min sem ping = problema
-    ZOMBIE_THRESHOLD: 900000, // 15 min = sessão zumbi
+    PING_TIMEOUT_THRESHOLD: 600000, // 10 min sem ping = problema (era 5min)
+    ZOMBIE_THRESHOLD: 1800000, // 30 min = sessão zumbi (era 15min)
 
     // ═══════════════════════════════════════════════════════════════
     // PROTEÇÃO CONTRA ERROS DE CONTEXTO
     // Mais tolerante a erros temporários
     // ═══════════════════════════════════════════════════════════════
     CONTEXT_ERROR_COOLDOWN: 10000, // Espera após erro de contexto
-    MAX_CONTEXT_ERRORS: 8, // Máximo antes de reconectar
+    MAX_CONTEXT_ERRORS: 15, // Máximo antes de reconectar (era 8)
     PAGE_NAVIGATION_DELAY: 5000, // Delay após navegação
 
     // ═══════════════════════════════════════════════════════════════
@@ -111,7 +111,7 @@ const RESILIENCE_CONFIG = {
     // ═══════════════════════════════════════════════════════════════
     ENABLE_AUTO_RECONNECT: true,
     ENABLE_HEALTH_CHECK: true,
-    ENABLE_DEEP_HEALTH_CHECK: true,
+    ENABLE_DEEP_HEALTH_CHECK: false, // DESABILITADO - causa instabilidade com pupPage.evaluate extensivo
     ENABLE_MEMORY_MONITORING: true,
     ENABLE_ZOMBIE_DETECTION: true,
     ENABLE_AUTO_RECOVERY: true
