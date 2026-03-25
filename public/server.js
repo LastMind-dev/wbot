@@ -179,7 +179,6 @@ app.use(limiter);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
 
 // Configuração de Sessão (Segurança)
 app.use(session({
@@ -194,6 +193,32 @@ app.use(session({
     }
 }));
 
+// Proteger páginas/assets administrativos servidos de forma estática
+const protectedStaticPaths = new Set([
+    '/dashboard.html',
+    '/dashboard.js',
+    '/dashboard.css',
+    '/grupos.html'
+]);
+
+app.use((req, res, next) => {
+    if (!protectedStaticPaths.has(req.path)) {
+        return next();
+    }
+
+    if (req.session && req.session.user) {
+        return next();
+    }
+
+    if (req.path.endsWith('.html')) {
+        return res.redirect('/login');
+    }
+
+    return res.status(401).send('Unauthorized');
+});
+
+app.use(express.static('public'));
+
 // Rota raiz para verificar se a API está online
 app.get('/', (req, res) => {
     res.send(`
@@ -202,9 +227,9 @@ app.get('/', (req, res) => {
             <p>Status: <strong>Operacional</strong></p>
             <p>Instâncias Ativas: ${sessions.size}</p>
             <br>
-            <a href="/dashboard.html" style="background: #4c3b94; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Dashboard Principal</a>
+            <a href="/dashboard" style="background: #4c3b94; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Dashboard Principal</a>
             <a href="/admin" style="background: #25D366; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Instâncias</a>
-            <a href="/grupos.html" style="background: #6f42c1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Grupos</a>
+            <a href="/grupos" style="background: #6f42c1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">Gerenciar Grupos</a>
         </div>
     `);
 });
@@ -212,6 +237,18 @@ app.get('/', (req, res) => {
 // Dashboard Principal (Nova Interface UIkit)
 app.get('/dashboard', requireAuth, (req, res) => {
     res.sendFile(__dirname + '/public/dashboard.html');
+});
+
+app.get('/dashboard.html', requireAuth, (req, res) => {
+    res.redirect('/dashboard');
+});
+
+app.get('/grupos', requireAuth, (req, res) => {
+    res.sendFile(__dirname + '/public/grupos.html');
+});
+
+app.get('/grupos.html', requireAuth, (req, res) => {
+    res.redirect('/grupos');
 });
 
 // Criar Nova Instância (API)
