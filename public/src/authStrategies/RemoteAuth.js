@@ -119,16 +119,17 @@ class RemoteAuth extends BaseAuthStrategy {
         clearInterval(this.backupSync);
 
         console.log(`[RemoteAuth] ${this.sessionName}: disconnect called (reason=${reason || 'unknown'})`);
+        console.log(`[RemoteAuth] ${this.sessionName}: keeping local session directory as fallback until next startup`);
 
-        /* Clean up local files but keep remote session intact in MySQL */
-        let localPathExists = await this.isValidPath(this.userDataDir);
-        if (localPathExists) {
-            await fs.promises.rm(this.userDataDir, {
-                recursive: true,
-                force: true,
-                maxRetries: this.rmMaxRetries,
-            }).catch(() => {});
-        }
+        // Limpar apenas artefatos temporários; a pasta principal da sessão fica preservada
+        // para evitar perda de autenticação caso o backup remoto ainda não exista.
+        await fs.promises.rm(`${this.tempDir}`, {
+            recursive: true,
+            force: true,
+            maxRetries: this.rmMaxRetries,
+        }).catch(() => {});
+
+        await fs.promises.unlink(`${this.sessionName}.zip`).catch(() => {});
     }
 
     async afterAuthReady() {
@@ -227,24 +228,49 @@ class RemoteAuth extends BaseAuthStrategy {
         const pathExists = await this.isValidPath(this.userDataDir);
         const compressedSessionPath = `${this.sessionName}.zip`;
         const sessionExists = await this.store.sessionExists({ session: this.sessionName });
+        const localSessionLooksValid = pathExists ? await this.hasRequiredLocalSession() : false;
 
-        console.log(`[RemoteAuth] ${this.sessionName}: extractRemoteSession - localExists=${pathExists}, dbExists=${sessionExists}`);
+        console.log(`[RemoteAuth] ${this.sessionName}: extractRemoteSession - localExists=${pathExists}, localValid=${localSessionLooksValid}, dbExists=${sessionExists}`);
 
-        if (pathExists) {
-            await fs.promises.rm(this.userDataDir, {
-                recursive: true,
-                force: true,
-                maxRetries: this.rmMaxRetries,
-            }).catch(() => {});
-        }
         if (sessionExists) {
+            if (pathExists) {
+                await fs.promises.rm(this.userDataDir, {
+                    recursive: true,
+                    force: true,
+                    maxRetries: this.rmMaxRetries,
+                }).catch(() => {});
+            }
+
             console.log(`[RemoteAuth] ${this.sessionName}: Restoring session from MySQL...`);
             await this.store.extract({ session: this.sessionName, path: compressedSessionPath });
             await this.unCompressSession(compressedSessionPath);
             console.log(`[RemoteAuth] ${this.sessionName}: Session restored successfully from MySQL`);
+        } else if (localSessionLooksValid) {
+            console.log(`[RemoteAuth] ${this.sessionName}: No session in MySQL, but valid local session exists - reusing local fallback`);
         } else {
+            if (pathExists) {
+                console.log(`[RemoteAuth] ${this.sessionName}: Local session exists but looks incomplete - resetting local directory`);
+                await fs.promises.rm(this.userDataDir, {
+                    recursive: true,
+                    force: true,
+                    maxRetries: this.rmMaxRetries,
+                }).catch(() => {});
+            }
+
             console.log(`[RemoteAuth] ${this.sessionName}: No session in MySQL - creating empty dir (will need QR code)`);
             fs.mkdirSync(this.userDataDir, { recursive: true });
+        }
+    }
+
+    async hasRequiredLocalSession(dirPath = this.userDataDir) {
+        try {
+            for (const requiredDir of this.requiredDirs) {
+                const target = path.join(dirPath, requiredDir);
+                await fs.promises.access(target);
+            }
+            return true;
+        } catch {
+            return false;
         }
     }
 

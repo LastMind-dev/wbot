@@ -696,6 +696,8 @@ const BACKUP_SYNC_INTERVAL = parseInt(process.env.BACKUP_SYNC_INTERVAL) || 12000
 // Store active sessions - Usando sessionManager para gerenciamento resiliente
 // Mantendo 'sessions' como alias para compatibilidade
 const sessions = sessionManager.sessions;
+const remoteSessionBackupTimers = new Map();
+const DELETE_SESSION_ON_AUTH_FAILURE = process.env.DELETE_SESSION_ON_AUTH_FAILURE === 'true';
 
 // Middleware de Autenticação
 function requireAuth(req, res, next) {
@@ -982,6 +984,55 @@ async function updateInstanceStatus(instanceId, status, phoneNumber = null, conn
     } catch (error) {
         logger.error(instanceId, `Erro ao atualizar status: ${error.message}`);
     }
+}
+
+function scheduleRemoteSessionBackupCheck(instanceId, delayMs = 45000, trigger = 'unknown') {
+    if (!USE_REMOTE_AUTH || !mysqlStore) return;
+
+    const existingTimer = remoteSessionBackupTimers.get(instanceId);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(async() => {
+        remoteSessionBackupTimers.delete(instanceId);
+
+        try {
+            const session = sessionManager.get(instanceId);
+            if (!session || !session.client || !session.client.authStrategy) return;
+
+            const authStrategy = session.client.authStrategy;
+            if (typeof authStrategy.storeRemoteSession !== 'function') return;
+
+            const sessionName = `RemoteAuth-${instanceId}`;
+            const exists = await mysqlStore.sessionExists({ session: sessionName });
+
+            if (exists) {
+                logger.session(instanceId, `Sessão RemoteAuth confirmada no MySQL (${trigger})`);
+                return;
+            }
+
+            const allowedStatuses = [CONNECTION_STATUS.CONNECTED, 'AUTHENTICATED'];
+            if (!allowedStatuses.includes(session.status)) {
+                logger.warn(instanceId, `Backup forçado ignorado: status atual ${session.status} (${trigger})`);
+                return;
+            }
+
+            logger.warn(instanceId, `Sessão RemoteAuth ainda não persistida após ${Math.round(delayMs / 1000)}s (${trigger}) - executando backup forçado`);
+            await authStrategy.storeRemoteSession({ emit: true });
+
+            const existsAfter = await mysqlStore.sessionExists({ session: sessionName });
+            if (existsAfter) {
+                logger.session(instanceId, `Backup RemoteAuth persistido com sucesso (${trigger})`);
+            } else {
+                logger.warn(instanceId, `Backup RemoteAuth forçado não apareceu no MySQL (${trigger})`);
+            }
+        } catch (err) {
+            logger.error(instanceId, `Erro ao verificar backup RemoteAuth (${trigger}): ${err.message}`);
+        }
+    }, delayMs);
+
+    remoteSessionBackupTimers.set(instanceId, timer);
 }
 
 // Lock para evitar startSession() concorrente na mesma instância
@@ -1468,6 +1519,9 @@ async function _startSessionInternal(instanceId) {
 
         await updateInstanceStatus(instanceId, 1, phoneNumber, CONNECTION_STATUS.CONNECTED);
 
+        // Verificação defensiva: se o save automático não acontecer, forçar um backup
+        scheduleRemoteSessionBackupCheck(instanceId, 30000, 'ready');
+
         // ═══════════════════════════════════════════════════════════════════
         // PROCESSAR FILA DE MENSAGENS PENDENTES
         // ═══════════════════════════════════════════════════════════════════
@@ -1512,6 +1566,10 @@ async function _startSessionInternal(instanceId) {
         if (session) {
             session.status = 'AUTHENTICATED';
             session.authenticatedAt = Date.now();
+
+            // Failsafe: algumas contas autenticam mas demoram para disparar ready.
+            // Se o backup ainda não existir, tentamos persistir manualmente depois.
+            scheduleRemoteSessionBackupCheck(instanceId, 45000, 'authenticated');
 
             // Verificação MUITO agressiva - primeira em 10s, depois a cada 15s
             const checkAuthenticatedState = async(attempt = 1) => {
@@ -1625,34 +1683,40 @@ async function _startSessionInternal(instanceId) {
             session.authFailureReason = msg;
         }
 
-        // Só deletar sessão após múltiplas falhas consecutivas
-        // Isso dá chance para rejeições temporárias do WhatsApp se resolverem
+        // Por padrão, NUNCA apagamos automaticamente a sessão persistida em auth_failure.
+        // Em produção isso costuma ser pior que o problema original, porque força novo QR.
         if (authFailureCount >= AUTH_FAILURE_DELETE_THRESHOLD) {
-            console.log(`[${instanceId}] 🗑️ ${authFailureCount} auth failures consecutivos - deletando sessão do MySQL`);
+            if (DELETE_SESSION_ON_AUTH_FAILURE) {
+                console.log(`[${instanceId}] 🗑️ ${authFailureCount} auth failures consecutivos - deletando sessão persistida por configuração`);
 
-            if (USE_REMOTE_AUTH && mysqlStore) {
-                const sessionName = `RemoteAuth-${instanceId}`;
-                try {
-                    const exists = await mysqlStore.sessionExists({ session: sessionName });
-                    if (exists) {
-                        await mysqlStore.delete({ session: sessionName });
-                        console.log(`[${instanceId}] 🗑️ Sessão RemoteAuth deletada do MySQL (auth_failure persistente)`);
+                if (USE_REMOTE_AUTH && mysqlStore) {
+                    const sessionName = `RemoteAuth-${instanceId}`;
+                    try {
+                        const exists = await mysqlStore.sessionExists({ session: sessionName });
+                        if (exists) {
+                            await mysqlStore.delete({ session: sessionName });
+                            console.log(`[${instanceId}] 🗑️ Sessão RemoteAuth deletada do MySQL (auth_failure persistente)`);
+                        }
+                    } catch (delErr) {
+                        console.error(`[${instanceId}] Erro ao deletar sessão após auth_failure:`, delErr.message);
                     }
-                } catch (delErr) {
-                    console.error(`[${instanceId}] Erro ao deletar sessão após auth_failure:`, delErr.message);
+                }
+
+                const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
+                if (fs.existsSync(remoteSessionPath)) {
+                    try {
+                        fs.rmSync(remoteSessionPath, { recursive: true, force: true });
+                        console.log(`[${instanceId}] 🗑️ Pasta RemoteAuth local removida após auth_failure persistente`);
+                    } catch (e) {}
+                }
+            } else {
+                console.log(`[${instanceId}] ⚠️ Auth failure persistente detectado - preservando sessão para retry automático (DELETE_SESSION_ON_AUTH_FAILURE=false)`);
+                if (session) {
+                    session.needsReconnect = true;
                 }
             }
 
-            // Limpar pasta local também
-            const remoteSessionPath = path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${instanceId}`);
-            if (fs.existsSync(remoteSessionPath)) {
-                try {
-                    fs.rmSync(remoteSessionPath, { recursive: true, force: true });
-                    console.log(`[${instanceId}] 🗑️ Pasta RemoteAuth local removida após auth_failure persistente`);
-                } catch (e) {}
-            }
-
-            authFailureCount = 0; // Reset após deletar
+            authFailureCount = 0;
         } else {
             console.log(`[${instanceId}] ⏳ Auth failure temporário - mantendo sessão para retry (${authFailureCount}/${AUTH_FAILURE_DELETE_THRESHOLD})`);
         }
