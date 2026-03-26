@@ -734,6 +734,7 @@ const BACKUP_SYNC_INTERVAL = parseInt(process.env.BACKUP_SYNC_INTERVAL) || 12000
 // Mantendo 'sessions' como alias para compatibilidade
 const sessions = sessionManager.sessions;
 const remoteSessionBackupTimers = new Map();
+const controlledReconnectTimers = new Map();
 const DELETE_SESSION_ON_AUTH_FAILURE = process.env.DELETE_SESSION_ON_AUTH_FAILURE === 'true';
 
 // Middleware de Autenticação
@@ -742,6 +743,31 @@ function requireAuth(req, res, next) {
         return next();
     }
     res.redirect('/login');
+}
+
+function clearControlledReconnect(instanceId) {
+    const timer = controlledReconnectTimers.get(instanceId);
+    if (timer) {
+        clearTimeout(timer);
+        controlledReconnectTimers.delete(instanceId);
+    }
+}
+
+function scheduleControlledReconnect(instanceId, delayMs, reason) {
+    clearControlledReconnect(instanceId);
+
+    logger.reconnect(instanceId, `Reconexão controlada agendada em ${Math.round(delayMs / 1000)}s (${reason})`);
+
+    const timer = setTimeout(async() => {
+        controlledReconnectTimers.delete(instanceId);
+        try {
+            await forceReconnect(instanceId, reason);
+        } catch (err) {
+            logger.error(instanceId, `Erro na reconexão controlada (${reason}): ${err.message}`);
+        }
+    }, delayMs);
+
+    controlledReconnectTimers.set(instanceId, timer);
 }
 
 async function initDB() {
@@ -1539,6 +1565,7 @@ async function _startSessionInternal(instanceId) {
 
     client.on('ready', async() => {
         logger.session(instanceId, 'Cliente READY - conectado!');
+        clearControlledReconnect(instanceId);
         authFailureCount = 0; // Reset auth failures on successful connection
         const session = sessionManager.get(instanceId);
         if (session) {
@@ -1599,6 +1626,7 @@ async function _startSessionInternal(instanceId) {
 
     client.on('authenticated', () => {
         console.log(`Client ${instanceId} authenticated`);
+        clearControlledReconnect(instanceId);
         const session = sessionManager.get(instanceId);
         if (session) {
             session.status = 'AUTHENTICATED';
@@ -1718,6 +1746,7 @@ async function _startSessionInternal(instanceId) {
         if (session) {
             session.status = CONNECTION_STATUS.AUTH_FAILURE;
             session.authFailureReason = msg;
+            session.needsReconnect = true;
         }
 
         // Por padrão, NUNCA apagamos automaticamente a sessão persistida em auth_failure.
@@ -1746,16 +1775,17 @@ async function _startSessionInternal(instanceId) {
                         console.log(`[${instanceId}] 🗑️ Pasta RemoteAuth local removida após auth_failure persistente`);
                     } catch (e) {}
                 }
+
+                clearControlledReconnect(instanceId);
             } else {
                 console.log(`[${instanceId}] ⚠️ Auth failure persistente detectado - preservando sessão para retry automático (DELETE_SESSION_ON_AUTH_FAILURE=false)`);
-                if (session) {
-                    session.needsReconnect = true;
-                }
+                scheduleControlledReconnect(instanceId, 180000, 'AUTH_FAILURE_PERSISTENTE');
             }
 
             authFailureCount = 0;
         } else {
             console.log(`[${instanceId}] ⏳ Auth failure temporário - mantendo sessão para retry (${authFailureCount}/${AUTH_FAILURE_DELETE_THRESHOLD})`);
+            scheduleControlledReconnect(instanceId, Math.min(300000, 45000 * authFailureCount), `AUTH_FAILURE_${authFailureCount}`);
         }
     });
 
@@ -1779,6 +1809,7 @@ async function _startSessionInternal(instanceId) {
 
     client.on('disconnected', async(reason) => {
         logger.error(instanceId, `DISCONNECTED - Reason: ${reason}`);
+        clearControlledReconnect(instanceId);
         await updateInstanceStatus(instanceId, 0, null, CONNECTION_STATUS.DISCONNECTED, reason);
 
         // Clean up session
