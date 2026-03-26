@@ -214,6 +214,7 @@ function renderInstancesTable() {
                 <td class="uk-text-right">
                     ${inst.status === 'QR_CODE' ? `<button class="uk-button uk-button-small uk-button-default" onclick="showQrCode('${inst.id}')"><span uk-icon="icon: camera"></span></button>` : ''}
                     ${inst.status === 'DISCONNECTED' ? `<button class="uk-button uk-button-small uk-button-primary" onclick="startSession('${inst.id}')"><span uk-icon="icon: play"></span></button>` : ''}
+                    ${inst.status === 'AUTH_FAILURE' ? `<button class="uk-button uk-button-small uk-button-primary" onclick="resetAndStartSession('${inst.id}')"><span uk-icon="icon: refresh"></span></button>` : ''}
                     ${inst.status === 'CONNECTED' ? `<button class="uk-button uk-button-small uk-button-danger" onclick="stopSession('${inst.id}')"><span uk-icon="icon: ban"></span></button>` : ''}
                 </td>
             </tr>
@@ -241,7 +242,8 @@ function renderFullInstancesTable() {
                 <td class="uk-text-right">
                     <button class="uk-button uk-button-small uk-button-secondary action-btn" onclick="showInstanceInfo('${inst.id}')" title="Informações API"><span uk-icon="icon: info; ratio: 0.8"></span></button>
                     ${inst.status === 'QR_CODE' ? `<button class="uk-button uk-button-small uk-button-default action-btn" onclick="showQrCode('${inst.id}')" title="Ver QR Code"><span uk-icon="icon: camera; ratio: 0.8"></span></button>` : ''}
-                    ${inst.status === 'DISCONNECTED' || inst.status === 'AUTH_FAILURE' ? `<button class="uk-button uk-button-small uk-button-primary action-btn" onclick="startSession('${inst.id}')" title="Iniciar"><span uk-icon="icon: play; ratio: 0.8"></span></button>` : ''}
+                    ${inst.status === 'DISCONNECTED' ? `<button class="uk-button uk-button-small uk-button-primary action-btn" onclick="startSession('${inst.id}')" title="Iniciar"><span uk-icon="icon: play; ratio: 0.8"></span></button>` : ''}
+                    ${inst.status === 'AUTH_FAILURE' ? `<button class="uk-button uk-button-small uk-button-primary action-btn" onclick="resetAndStartSession('${inst.id}')" title="Limpar autenticação e gerar novo QR"><span uk-icon="icon: refresh; ratio: 0.8"></span></button>` : ''}
                     ${inst.status === 'CONNECTED' || inst.status === 'INITIALIZING' ? `<button class="uk-button uk-button-small uk-button-warning action-btn" onclick="stopSession('${inst.id}')" title="Parar"><span uk-icon="icon: ban; ratio: 0.8"></span></button>` : ''}
                     <button class="uk-button uk-button-small uk-button-default action-btn" onclick="reconnectSession('${inst.id}')" title="Reconectar"><span uk-icon="icon: refresh; ratio: 0.8"></span></button>
                     <button class="uk-button uk-button-small uk-button-danger action-btn" onclick="deleteInstance('${inst.id}', '${escapeHtml(inst.name || inst.id)}')" title="Deletar"><span uk-icon="icon: trash; ratio: 0.8"></span></button>
@@ -379,6 +381,49 @@ async function startSession(instanceId) {
     }
 }
 
+async function resetAndStartSession(instanceId) {
+    if (!confirm('Isso vai limpar apenas a autenticação do WhatsApp desta instância e gerar um novo QR Code. O ID e o token da API serão mantidos. Deseja continuar?')) {
+        return;
+    }
+
+    try {
+        const resetRes = await fetch('/api/session/reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instanceId })
+        });
+        const resetData = await resetRes.json();
+
+        if (!resetRes.ok || !resetData.success) {
+            throw new Error(resetData.error || resetData.message || 'Falha ao resetar a sessão');
+        }
+
+        showNotification(resetData.message || 'Sessão resetada com sucesso.', 'info');
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        const startRes = await fetch('/api/session/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instanceId })
+        });
+        const startData = await startRes.json();
+
+        if (!startRes.ok || !startData.success) {
+            throw new Error(startData.error || startData.message || 'Falha ao iniciar a sessão');
+        }
+
+        showNotification('Sessão reiniciada. Gerando novo QR Code...', 'success');
+
+        setTimeout(async() => {
+            await loadInstances();
+            showQrCode(instanceId);
+        }, 2500);
+    } catch (err) {
+        showNotification('Erro: ' + err.message, 'error');
+    }
+}
+
 async function stopSession(instanceId) {
     try {
         const res = await fetch('/api/session/stop', {
@@ -484,9 +529,9 @@ function showQrCode(instanceId) {
                 qrRefreshInterval = null;
 
                 if (statusText) {
-                    statusText.innerHTML = '<span class="uk-text-danger"><span uk-icon="icon: close; ratio: 0.9"></span> Falha na autenticação</span>';
+                    statusText.innerHTML = '<span class="uk-text-danger"><span uk-icon="icon: close; ratio: 0.9"></span> Falha na autenticação. Use o botao azul para limpar a sessao e gerar um novo QR.</span>';
                 }
-                showNotification('Falha na autenticação. Tente novamente.', 'error');
+                showNotification('Falha na autenticação. Limpe a sessão desta instância para gerar um novo QR.', 'error');
                 loadInstances();
             }
         } catch (err) {

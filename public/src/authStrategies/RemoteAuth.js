@@ -287,27 +287,45 @@ class RemoteAuth extends BaseAuthStrategy {
             const defaultIndexedDb = path.join(defaultDir, 'IndexedDB');
             const defaultLocalStorage = path.join(defaultDir, 'Local Storage');
 
-            const pathLooksValid = async(indexedDbPath, localStoragePath) => {
+            const rootWhatsAppMarkers = [
+                path.join(rootIndexedDb, 'https_web.whatsapp.com_0.indexeddb.leveldb'),
+                path.join(rootIndexedDb, 'https_web.whatsapp.com_0.indexeddb.blob')
+            ];
+            const defaultWhatsAppMarkers = [
+                path.join(defaultIndexedDb, 'https_web.whatsapp.com_0.indexeddb.leveldb'),
+                path.join(defaultIndexedDb, 'https_web.whatsapp.com_0.indexeddb.blob')
+            ];
+
+            const hasAnyPath = async(paths) => {
                 try {
-                    await fs.promises.access(indexedDbPath);
-                    await fs.promises.access(localStoragePath);
-                    return true;
+                    for (const candidate of paths) {
+                        try {
+                            await fs.promises.access(candidate);
+                            return candidate;
+                        } catch {}
+                    }
+                    return null;
                 } catch {
-                    return false;
+                    return null;
                 }
             };
 
-            if (await pathLooksValid(rootIndexedDb, rootLocalStorage)) {
-                console.log(`[RemoteAuth] ${this.sessionName}: local session validation OK using root IndexedDB/Local Storage`);
+            const rootMarker = await hasAnyPath(rootWhatsAppMarkers);
+            const defaultMarker = await hasAnyPath(defaultWhatsAppMarkers);
+
+            if (rootMarker) {
+                await fs.promises.access(rootLocalStorage);
+                console.log(`[RemoteAuth] ${this.sessionName}: local session validation OK using root WhatsApp marker ${path.basename(rootMarker)}`);
                 return true;
             }
 
-            if (await pathLooksValid(defaultIndexedDb, defaultLocalStorage)) {
-                console.log(`[RemoteAuth] ${this.sessionName}: local session validation OK using Default/IndexedDB and Default/Local Storage`);
+            if (defaultMarker) {
+                await fs.promises.access(defaultLocalStorage);
+                console.log(`[RemoteAuth] ${this.sessionName}: local session validation OK using Default WhatsApp marker ${path.basename(defaultMarker)}`);
                 return true;
             }
 
-            console.log(`[RemoteAuth] ${this.sessionName}: local session validation FAILED - Default exists but IndexedDB/Local Storage not found in expected locations`);
+            console.log(`[RemoteAuth] ${this.sessionName}: local session validation FAILED - Chromium profile exists, but WhatsApp auth markers were not found`);
             return false;
         } catch {
             return false;

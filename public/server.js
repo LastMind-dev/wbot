@@ -1176,9 +1176,35 @@ async function _startSessionInternal(instanceId) {
     // Verificar se já existe sessão ativa
     if (sessionManager.has(instanceId)) {
         const existingSession = sessionManager.get(instanceId);
-        if (existingSession.client && existingSession.status !== CONNECTION_STATUS.DISCONNECTED) {
+
+        const restartableStatuses = [
+            CONNECTION_STATUS.DISCONNECTED,
+            CONNECTION_STATUS.AUTH_FAILURE,
+            CONNECTION_STATUS.INIT_ERROR,
+            CONNECTION_STATUS.SYNC_TIMEOUT
+        ];
+
+        if (existingSession.client && !restartableStatuses.includes(existingSession.status)) {
             logger.session(instanceId, 'Sessão já ativa, ignorando');
             return existingSession;
+        }
+
+        if (restartableStatuses.includes(existingSession.status)) {
+            logger.session(instanceId, `Sessão existente em ${existingSession.status} - limpando cliente para nova inicialização`);
+
+            try {
+                if (existingSession.client) {
+                    existingSession.client.removeAllListeners();
+                    await Promise.race([
+                        existingSession.client.destroy(),
+                        new Promise(resolve => setTimeout(resolve, RESILIENCE_CONFIG.DESTROY_TIMEOUT))
+                    ]);
+                }
+            } catch (cleanupErr) {
+                logger.warn(instanceId, `Falha ao limpar sessão ${existingSession.status}: ${cleanupErr.message}`);
+            }
+
+            sessionManager.delete(instanceId);
         }
     }
 
