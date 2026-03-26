@@ -279,11 +279,36 @@ class RemoteAuth extends BaseAuthStrategy {
 
     async hasRequiredLocalSession(dirPath = this.userDataDir) {
         try {
-            for (const requiredDir of this.requiredDirs) {
-                const target = path.join(dirPath, requiredDir);
-                await fs.promises.access(target);
+            const defaultDir = path.join(dirPath, 'Default');
+            await fs.promises.access(defaultDir);
+
+            const rootIndexedDb = path.join(dirPath, 'IndexedDB');
+            const rootLocalStorage = path.join(dirPath, 'Local Storage');
+            const defaultIndexedDb = path.join(defaultDir, 'IndexedDB');
+            const defaultLocalStorage = path.join(defaultDir, 'Local Storage');
+
+            const pathLooksValid = async(indexedDbPath, localStoragePath) => {
+                try {
+                    await fs.promises.access(indexedDbPath);
+                    await fs.promises.access(localStoragePath);
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+
+            if (await pathLooksValid(rootIndexedDb, rootLocalStorage)) {
+                console.log(`[RemoteAuth] ${this.sessionName}: local session validation OK using root IndexedDB/Local Storage`);
+                return true;
             }
-            return true;
+
+            if (await pathLooksValid(defaultIndexedDb, defaultLocalStorage)) {
+                console.log(`[RemoteAuth] ${this.sessionName}: local session validation OK using Default/IndexedDB and Default/Local Storage`);
+                return true;
+            }
+
+            console.log(`[RemoteAuth] ${this.sessionName}: local session validation FAILED - Default exists but IndexedDB/Local Storage not found in expected locations`);
+            return false;
         } catch {
             return false;
         }
