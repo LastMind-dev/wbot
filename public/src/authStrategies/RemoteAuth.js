@@ -70,23 +70,17 @@ class RemoteAuth extends BaseAuthStrategy {
 
     async onAuthenticationNeeded() {
         const sessionExists = await this.store.sessionExists({ session: this.sessionName });
-        const localPathExists = await this.isValidPath(this.userDataDir);
-        const localSessionLooksValid = localPathExists ? await this.hasRequiredLocalSession() : false;
+        const restoredSource = this.extractedSessionSource || (sessionExists ? 'remote' : 'empty');
 
-        if (sessionExists || localSessionLooksValid) {
-            /* Não forçar restart interno aqui.
-             * O Client.initialize() reinicia imediatamente e isso entra em corrida
-             * com o nosso fluxo externo de reconnect, podendo derrubar a sessão
-             * antes dela estabilizar ou antes de reaproveitar o fallback local. */
-            console.log(`[RemoteAuth] ${this.sessionName}: Authentication needed but auth data still exists (db=${sessionExists}, local=${localSessionLooksValid}). Preserving session for controlled retry.`);
-            return {
-                failed: true,
-                restart: false,
-                failureEventPayload: 'Existing auth data preserved for controlled retry'
-            };
+        if (restoredSource === 'remote' || restoredSource === 'local' || sessionExists) {
+            /* Se o WhatsApp chegou no estado "precisa autenticar", não podemos
+             * bloquear o fluxo de QR aqui. Antes estávamos tratando isso como
+             * auth_failure e entrando em loop sem exibir o QR. */
+            console.log(`[RemoteAuth] ${this.sessionName}: Existing auth data was rejected by WhatsApp (source=${restoredSource}, db=${sessionExists}). Falling back to QR flow.`);
         } else {
-            console.log(`[RemoteAuth] ${this.sessionName}: No session in store - fresh QR code needed`);
+            console.log(`[RemoteAuth] ${this.sessionName}: No valid auth data restored at startup - fresh QR code needed`);
         }
+
         return { failed: false, restart: false, failureEventPayload: undefined };
     }
 
@@ -244,12 +238,14 @@ class RemoteAuth extends BaseAuthStrategy {
          * snapshot antigo/corrompido no MySQL. O banco continua como backup
          * para cold start, migração ou perda do disco local. */
         if (localSessionLooksValid) {
+            this.extractedSessionSource = 'local';
             if (sessionExists) {
                 console.log(`[RemoteAuth] ${this.sessionName}: Valid local session and MySQL backup found - preferring local session, keeping MySQL as fallback`);
             } else {
                 console.log(`[RemoteAuth] ${this.sessionName}: No session in MySQL, but valid local session exists - reusing local fallback`);
             }
         } else if (sessionExists) {
+            this.extractedSessionSource = 'remote';
             if (pathExists) {
                 await fs.promises.rm(this.userDataDir, {
                     recursive: true,
@@ -263,6 +259,7 @@ class RemoteAuth extends BaseAuthStrategy {
             await this.unCompressSession(compressedSessionPath);
             console.log(`[RemoteAuth] ${this.sessionName}: Session restored successfully from MySQL`);
         } else {
+            this.extractedSessionSource = 'empty';
             if (pathExists) {
                 console.log(`[RemoteAuth] ${this.sessionName}: Local session exists but looks incomplete - resetting local directory`);
                 await fs.promises.rm(this.userDataDir, {
